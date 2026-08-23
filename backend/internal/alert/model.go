@@ -10,19 +10,29 @@ import (
 type ComparisonOperator string
 type Level string
 type Status string
+type Source string
+type WarningType string
 
 const (
-	OperatorLT         ComparisonOperator = "LT"
-	OperatorLTE        ComparisonOperator = "LTE"
-	OperatorGT         ComparisonOperator = "GT"
-	OperatorGTE        ComparisonOperator = "GTE"
-	LevelInfo          Level              = "INFO"
-	LevelWarning       Level              = "WARNING"
-	LevelCritical      Level              = "CRITICAL"
-	StatusActive       Status             = "ACTIVE"
-	StatusAcknowledged Status             = "ACKNOWLEDGED"
-	StatusResolved     Status             = "RESOLVED"
-	StatusClosed       Status             = "CLOSED"
+	OperatorLT      ComparisonOperator = "LT"
+	OperatorLTE     ComparisonOperator = "LTE"
+	OperatorGT      ComparisonOperator = "GT"
+	OperatorGTE     ComparisonOperator = "GTE"
+	LevelLow        Level              = "LOW"
+	LevelMedium     Level              = "MEDIUM"
+	LevelHigh       Level              = "HIGH"
+	StatusActive    Status             = "ACTIVE"
+	StatusConfirmed Status             = "CONFIRMED"
+	// StatusAcknowledged is retained for rows written before the API contract
+	// standardized the user-facing state name as CONFIRMED.
+	StatusAcknowledged  Status      = "ACKNOWLEDGED"
+	StatusResolved      Status      = "RESOLVED"
+	StatusClosed        Status      = "CLOSED"
+	SourceRule          Source      = "RULE"
+	SourceDevice        Source      = "DEVICE"
+	WarningTemperature  WarningType = "TEMPERATURE"
+	WarningSoilMoisture WarningType = "SOIL_MOISTURE"
+	WarningLight        WarningType = "LIGHT"
 )
 
 type Rule struct {
@@ -42,16 +52,21 @@ type Rule struct {
 func (Rule) TableName() string { return "alert_rules" }
 
 type Alert struct {
-	ID             uint64          `json:"id" gorm:"primaryKey;autoIncrement"`
-	RuleID         uint64          `json:"ruleId" gorm:"column:rule_id;not null;index:idx_alerts_rule_status,priority:1"`
-	DeviceID       *uint64         `json:"deviceId,omitempty" gorm:"column:device_id;index:idx_alerts_device_triggered,priority:1"`
-	AcknowledgedBy *uint64         `json:"acknowledgedBy,omitempty" gorm:"column:acknowledged_by;index:idx_alerts_ack_user"`
-	Level          Level           `json:"level" gorm:"size:16;not null"`
-	Status         Status          `json:"status" gorm:"size:32;not null;index:idx_alerts_rule_status,priority:2"`
-	TriggerValue   decimal.Decimal `json:"triggerValue" gorm:"column:trigger_value;type:decimal(14,4);not null"`
-	TriggeredAt    time.Time       `json:"triggeredAt" gorm:"column:triggered_at;not null;index:idx_alerts_device_triggered,priority:2"`
-	AcknowledgedAt *time.Time      `json:"acknowledgedAt,omitempty" gorm:"column:acknowledged_at"`
-	ResolvedAt     *time.Time      `json:"resolvedAt,omitempty" gorm:"column:resolved_at"`
+	ID                 uint64          `json:"id" gorm:"primaryKey;autoIncrement"`
+	RuleID             *uint64         `json:"ruleId,omitempty" gorm:"column:rule_id;index:idx_alerts_rule_status,priority:1"`
+	PlotID             uint64          `json:"plotId" gorm:"column:plot_id;not null;index:idx_alerts_plot_status,priority:1"`
+	DeviceID           *uint64         `json:"deviceId,omitempty" gorm:"column:device_id;index:idx_alerts_device_triggered,priority:1"`
+	Source             Source          `json:"source" gorm:"size:16;not null"`
+	WarningType        *WarningType    `json:"warningType,omitempty" gorm:"column:warning_type;size:32"`
+	ActiveDedupKey     *string         `json:"-" gorm:"column:active_dedup_key;size:128;uniqueIndex:uk_alerts_active_dedup"`
+	AcknowledgedBy     *uint64         `json:"acknowledgedBy,omitempty" gorm:"column:acknowledged_by;index:idx_alerts_ack_user"`
+	Level              Level           `json:"level" gorm:"size:16;not null"`
+	Status             Status          `json:"status" gorm:"size:32;not null;index:idx_alerts_rule_status,priority:2"`
+	TriggerValue       decimal.Decimal `json:"triggerValue" gorm:"column:trigger_value;type:decimal(14,4);not null"`
+	TriggeredAt        time.Time       `json:"triggeredAt" gorm:"column:triggered_at;not null;index:idx_alerts_device_triggered,priority:2"`
+	AcknowledgedAt     *time.Time      `json:"acknowledgedAt,omitempty" gorm:"column:acknowledged_at"`
+	ConfirmationRemark *string         `json:"confirmationRemark,omitempty" gorm:"column:confirmation_remark;size:500"`
+	ResolvedAt         *time.Time      `json:"resolvedAt,omitempty" gorm:"column:resolved_at"`
 	persistence.Auditable
 }
 

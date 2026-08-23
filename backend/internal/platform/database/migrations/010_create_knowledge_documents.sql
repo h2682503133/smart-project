@@ -1,0 +1,22 @@
+CREATE TABLE knowledge_documents (
+    id BIGINT NOT NULL AUTO_INCREMENT,
+    title VARCHAR(255) NOT NULL,
+    category VARCHAR(64) NOT NULL,
+    object_key VARCHAR(512) NOT NULL COMMENT 'MinIO object key',
+    file_hash CHAR(64) NOT NULL COMMENT 'SHA-256 in lowercase hexadecimal',
+    source VARCHAR(255) NULL,
+    status VARCHAR(16) NOT NULL DEFAULT 'DRAFT' COMMENT 'DRAFT/APPROVED/ACTIVE/ARCHIVED',
+    version INT NOT NULL DEFAULT 1,
+    uploaded_by BIGINT NOT NULL,
+    approved_by BIGINT NULL,
+    published_at DATETIME(6) NULL,
+    archived_at DATETIME(6) NULL,
+    created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+    PRIMARY KEY (id),
+    CONSTRAINT uk_knowledge_doc_title_version UNIQUE (title, version),
+    CONSTRAINT uk_knowledge_doc_file_hash UNIQUE (file_hash),
+    KEY idx_knowledge_doc_status_category (status, category, version),
+    CONSTRAINT fk_knowledge_doc_uploader FOREIGN KEY (uploaded_by) REFERENCES users (id),
+    CONSTRAINT fk_knowledge_doc_approver FOREIGN KEY (approved_by) REFERENCES users (id)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci;

@@ -1,0 +1,2 @@
+ALTER TABLE alert_rules
+    MODIFY COLUMN enabled TINYINT(1) NOT NULL DEFAULT 1;

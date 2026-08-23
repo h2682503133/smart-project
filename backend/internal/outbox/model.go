@@ -10,9 +10,10 @@ import (
 type Status string
 
 const (
-	StatusPending   Status = "PENDING"
-	StatusPublished Status = "PUBLISHED"
-	StatusFailed    Status = "FAILED"
+	StatusPending    Status = "PENDING"
+	StatusProcessing Status = "PROCESSING"
+	StatusPublished  Status = "PUBLISHED"
+	StatusFailed     Status = "FAILED"
 )
 
 type Event struct {

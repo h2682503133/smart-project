@@ -10,11 +10,13 @@ const (
 )
 
 type User struct {
-	ID           uint64     `json:"id" gorm:"primaryKey;autoIncrement"`
-	Name         string     `json:"name" gorm:"size:64;not null"`
-	Mobile       string     `json:"mobile" gorm:"size:32;not null;uniqueIndex:uk_users_mobile"`
-	PasswordHash string     `json:"-" gorm:"column:password_hash;size:255;not null"`
-	Status       UserStatus `json:"status" gorm:"size:32;not null"`
+	ID                uint64     `json:"id" gorm:"primaryKey;autoIncrement"`
+	AccountName       string     `json:"username" gorm:"column:name;size:64;not null;uniqueIndex:uk_users_name"`
+	Mobile            string     `json:"mobile" gorm:"size:32;not null;uniqueIndex:uk_users_mobile"`
+	PasswordHash      string     `json:"-" gorm:"column:password_hash;size:255;not null"`
+	Status            UserStatus `json:"status" gorm:"size:32;not null"`
+	InteractionStyle  *string    `json:"interactionStyle" gorm:"column:interaction_style;size:16"`
+	KnowledgeReliance *string    `json:"knowledgeReliance" gorm:"column:knowledge_reliance;size:16"`
 	persistence.Auditable
 }
 

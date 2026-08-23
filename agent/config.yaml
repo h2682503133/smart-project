@@ -1,0 +1,78 @@
+# agent 服务共享配置（非敏感）
+# 敏感项必须走环境变量（config.py 解析 ${VAR} 占位，缺则报错退出）：
+#   LLM_API_KEY / EMBEDDING_API_KEY / REDIS_PASSWORD / MILVUS_TOKEN /
+#   MINIO_SECRET_KEY / JWT_SECRET / GO_INTERNAL_KEY
+services:
+  redis:
+    host: localhost
+    port: 6379
+    db: 0
+    password: ""            # 本地无密码；生产用 ${REDIS_PASSWORD}
+    stream_prefix: "queue:"
+    consumer_group: "ingest"
+
+  go:
+    base_url: "http://localhost:8080/api/v1"
+    timeout_seconds: 10
+    internal_key: ${GO_INTERNAL_KEY}
+
+  auth:
+    jwt_secret: ${JWT_SECRET}
+    jwt_algorithm: HS256
+
+  llm:
+    base_url: "https://api.deepseek.com/v1"
+    api_key: ${LLM_API_KEY}
+    model: "deepseek-v4-flash"
+    temperature: 0.3
+    max_tokens: 1024
+
+  embedding:
+    mode: "multimodal"      # multimodal=火山vision（默认）/ standard=OpenAI兼容纯文本（doubao-embedding-text、本地bge-m3等）
+    base_url: "https://ark.cn-beijing.volces.com/api/v3"
+    api_key: ${EMBEDDING_API_KEY}
+    model: "ep-20260621064553-q2m69"
+    dimensions: 1024        # 自定义输出维度（multimodal 支持 1024，实测 512 不支持）
+
+  milvus:
+    host: localhost
+    port: 19530
+    token: ""               # 本地无认证；生产用 ${MILVUS_TOKEN}
+    dimension: 1024         # 与 embedding.dimensions 一致（火山接口支持 1024）
+    knowledge_collection: "knowledge"
+    memory_collection: "memory"
+
+  minio:
+    endpoint: "localhost:9000"
+    access_key: "minioadmin"
+    secret_key: ${MINIO_SECRET_KEY}
+    bucket: "knowledge"
+    secure: false
+
+  agent:
+    port: 8000
+    base_url: "http://localhost:8000"
+    max_tool_rounds: 5
+    close_timeout_minutes: 5
+    min_messages_for_summary: 2
+    memory_top_k: 3
+    max_concurrency: 20         # 最大并发对话数（并发满立即拒绝，不排队）
+    concurrency_wait_seconds: 0 # 并发等待上限=0：并发满立即拒绝（组内暂不排队）
+
+  context:
+    port: 8001
+    base_url: "http://localhost:8001"
+
+  tool:
+    port: 8002
+    base_url: "http://localhost:8002"
+    mock_go: false          # Go 已部署联调：工具走真实 Go 接口
+    top_k: 5                # search_knowledge 默认 top_k
+    plots_full_threshold: 5 # get_user_plots 全量返回阈值
+
+  ingest:
+    port: 8003
+    max_active_users: 1000  # Redis 窗口最大活跃用户数（LRU 判定）
+    evict_batch: 5          # 每次逐出数量
+    chunk_size: 800
+    chunk_overlap: 100
