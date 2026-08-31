@@ -1,7 +1,7 @@
 INSERT IGNORE INTO roles (role_code, role_name)
 VALUES ('WAREHOUSE_MANAGER', '仓库管理员');
 
-CREATE TABLE materials (
+CREATE TABLE IF NOT EXISTS materials (
     id BIGINT NOT NULL AUTO_INCREMENT,
     name VARCHAR(128) NOT NULL,
     category VARCHAR(64) NOT NULL,
@@ -15,7 +15,7 @@ CREATE TABLE materials (
     KEY idx_materials_status_category (status, category, id)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci;
 
-CREATE TABLE warehouses (
+CREATE TABLE IF NOT EXISTS warehouses (
     id BIGINT NOT NULL AUTO_INCREMENT,
     name VARCHAR(128) NOT NULL,
     location VARCHAR(255) NULL,
@@ -27,7 +27,7 @@ CREATE TABLE warehouses (
     KEY idx_warehouses_status (status, id)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci;
 
-CREATE TABLE stocks (
+CREATE TABLE IF NOT EXISTS stocks (
     id BIGINT NOT NULL AUTO_INCREMENT,
     warehouse_id BIGINT NOT NULL,
     material_id BIGINT NOT NULL,
@@ -43,7 +43,7 @@ CREATE TABLE stocks (
     CONSTRAINT fk_stocks_material FOREIGN KEY (material_id) REFERENCES materials (id)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci;
 
-CREATE TABLE stock_records (
+CREATE TABLE IF NOT EXISTS stock_records (
     id BIGINT NOT NULL AUTO_INCREMENT,
     warehouse_id BIGINT NOT NULL,
     material_id BIGINT NOT NULL,

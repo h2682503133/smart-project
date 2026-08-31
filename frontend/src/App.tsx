@@ -7,7 +7,8 @@ import { ControlPanelPage } from './pages/ControlPanelPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { DeviceListPage } from './pages/DeviceListPage';
 import { KnowledgePage } from './pages/KnowledgePage';
-import { AuthMode, ADMIN_ENTRY_KEY, defaultCredentials, LoginPage } from './pages/LoginPage';
+import { CustomerMarketPage } from './pages/CustomerMarketPage';
+import { AuthMode, defaultCredentials, LoginPage } from './pages/LoginPage';
 import type {
   AgentChatMessage,
   AlertItem,
@@ -31,7 +32,7 @@ type View = 'overview' | 'plots' | 'ask' | 'manage';
 const telemetryUpdatedEvent = 'telemetry.updated';
 const celsiusUnit = String.fromCharCode(176) + 'C';
 
-const adminRoles = ['SYSTEM_ADMIN', 'TECHNICIAN'];
+const adminRoles = ['SYSTEM_ADMIN', 'TECHNICIAN', 'WAREHOUSE_MANAGER'];
 
 function canAccessAdmin(role?: string) {
   return role != null && adminRoles.includes(role);
@@ -42,7 +43,6 @@ export default function App() {
   const [credentials, setCredentials] = useState(defaultCredentials);
   const [user, setUser] = useState<User | null>(null);
   const [view, setView] = useState<View>('overview');
-  const [adminMode, setAdminMode] = useState(() => window.location.hash === '#/admin');
   const [initialLoading, setInitialLoading] = useState(() => Boolean(tokenStorage().get()));
   const [refreshing, setRefreshing] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -154,6 +154,15 @@ export default function App() {
     setRefreshing(true);
     try {
       const profile = await api.me();
+      if (profile.role === 'CUSTOMER' || canAccessAdmin(profile.role)) {
+        if (requestId !== refreshRequestRef.current) return;
+        setUser(profile);
+        setData(emptyData);
+        setSelectedPlotId(null);
+        setOverviewPlotId(null);
+        setNotice('');
+        return;
+      }
       const [dashboard, plots, devices, alerts, commands, knowledge] = await Promise.all([
         api.dashboard().catch(() => null),
         api.plots(),
@@ -216,14 +225,6 @@ export default function App() {
   useEffect(() => {
     void loadData();
   }, [loadData]);
-
-  useEffect(() => {
-    function onHashChange() {
-      setAdminMode(window.location.hash === '#/admin');
-    }
-    window.addEventListener('hashchange', onHashChange);
-    return () => window.removeEventListener('hashchange', onHashChange);
-  }, []);
 
   useEffect(() => {
     const plotId = overviewSelectedPlot?.id;
@@ -313,10 +314,12 @@ export default function App() {
       const result = await api.login(credentials);
       tokenStorage().set(result.accessToken);
       setUser(result.user);
-      await loadData();
-      if (canAccessAdmin(result.user.role) && localStorage.getItem(ADMIN_ENTRY_KEY) === '1') {
-        window.location.hash = '#/admin';
+      if (result.user.role === 'CUSTOMER' || canAccessAdmin(result.user.role)) {
+        setData(emptyData);
+        setInitialLoading(false);
+        return;
       }
+      await loadData();
     } catch (error) {
       setNotice(errorMessage(error));
     } finally {
@@ -635,15 +638,14 @@ export default function App() {
     );
   }
 
-  if (user && adminMode && canAccessAdmin(user.role)) {
+  if (user?.role === 'CUSTOMER') {
+    return <CustomerMarketPage user={user} onLogout={logout} />;
+  }
+
+  if (user && canAccessAdmin(user.role)) {
     return (
       <AdminPanel
         user={user}
-        onBack={() => {
-          // 管理员可能同时是农户：返回手机端并清除入口标记，避免刷新后被拉回管理后台
-          localStorage.removeItem(ADMIN_ENTRY_KEY);
-          window.location.hash = '#/';
-        }}
         onLogout={logout}
       />
     );

@@ -1,7 +1,7 @@
 -- 采购意向订单（供应链最开端：顾客发意向 → 审批 → 生产 → 面谈成交）
 INSERT IGNORE INTO roles (role_code, role_name)
 VALUES ('CUSTOMER', '顾客');
-CREATE TABLE order_headers (
+CREATE TABLE IF NOT EXISTS order_headers (
     id BIGINT NOT NULL AUTO_INCREMENT,
     order_no VARCHAR(32) NOT NULL COMMENT '意向单号，Go 生成如 INT-20260830-001',
     status VARCHAR(16) NOT NULL DEFAULT 'PENDING' COMMENT 'PENDING/APPROVED/TRADING/CONFIRMED/CLOSED/REJECTED/DELETED',
@@ -17,7 +17,7 @@ CREATE TABLE order_headers (
     CONSTRAINT fk_order_headers_customer FOREIGN KEY (customer_id) REFERENCES users (id)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_0900_ai_ci;
 
-CREATE TABLE order_items (
+CREATE TABLE IF NOT EXISTS order_items (
     id BIGINT NOT NULL AUTO_INCREMENT,
     order_id BIGINT NOT NULL,
     material_id BIGINT NOT NULL,

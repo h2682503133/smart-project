@@ -1,5 +1,6 @@
 import { Leaf } from 'lucide-react';
-import { FormEvent, useRef, useState } from 'react';
+import { FormEvent } from 'react';
+import type { RegistrationRole } from '../types';
 
 export type AuthMode = 'login' | 'register';
 
@@ -7,16 +8,15 @@ export type AuthCredentials = {
   username: string;
   password: string;
   mobile: string;
+  role: RegistrationRole;
 };
 
 export const defaultCredentials: AuthCredentials = {
   username: '',
   password: '',
-  mobile: ''
+  mobile: '',
+  role: 'FARMER'
 };
-
-/** 管理后台隐藏入口标记（登录页叶子连点 3 次写入）。 */
-export const ADMIN_ENTRY_KEY = 'smart_admin_entry';
 
 type LoginPageProps = {
   authMode: AuthMode;
@@ -37,28 +37,8 @@ export function LoginPage({
   onCredentialsChange,
   onSubmit
 }: LoginPageProps) {
-  const [leafGone, setLeafGone] = useState(false);
-  const [hint, setHint] = useState('');
-  const leafClicksRef = useRef(0);
-  const leafTimerRef = useRef<number | null>(null);
   const errorField = notice ? loginErrorField(notice, authMode) : null;
   const connectionError = notice && !errorField ? notice : '';
-
-  function tapLeaf() {
-    leafClicksRef.current += 1;
-    if (leafTimerRef.current) {
-      window.clearTimeout(leafTimerRef.current);
-    }
-    leafTimerRef.current = window.setTimeout(() => {
-      leafClicksRef.current = 0;
-    }, 2000);
-    if (leafClicksRef.current >= 3) {
-      leafClicksRef.current = 0;
-      localStorage.setItem(ADMIN_ENTRY_KEY, '1');
-      setLeafGone(true);
-      setHint('管理入口已开启，登录后将进入管理后台');
-    }
-  }
 
   return (
     <main className="page-shell auth-shell">
@@ -73,14 +53,10 @@ export function LoginPage({
             <strong>智慧农田</strong>
             <span>张家湾温室 A3</span>
           </div>
-          <Leaf
-            className={`brand-icon${leafGone ? ' gone' : ''}`}
-            size={28}
-            onClick={tapLeaf}
-          />
+          <Leaf className="brand-icon" size={28} aria-hidden="true" />
         </div>
         <form className="auth-card" onSubmit={onSubmit}>
-          <h2>{authMode === 'login' ? '登录控制台' : '注册农田账号'}</h2>
+          <h2>{authMode === 'login' ? '登录控制台' : '注册账号'}</h2>
           <label>
             账号
             <input
@@ -94,18 +70,45 @@ export function LoginPage({
             {errorField === 'username' && <p className="field-error" id="auth-username-error" role="alert">{notice}</p>}
           </label>
           {authMode === 'register' && (
-            <label>
-              手机号
-              <input
-                value={credentials.mobile}
-                onChange={(event) => onCredentialsChange({ ...credentials, mobile: event.target.value })}
-                placeholder="请输入手机号"
-                className={errorField === 'mobile' ? 'input-invalid' : undefined}
-                aria-invalid={errorField === 'mobile'}
-                aria-describedby={errorField === 'mobile' ? 'auth-mobile-error' : undefined}
-              />
-              {errorField === 'mobile' && <p className="field-error" id="auth-mobile-error" role="alert">{notice}</p>}
-            </label>
+            <>
+              <label>
+                手机号
+                <input
+                  value={credentials.mobile}
+                  onChange={(event) => onCredentialsChange({ ...credentials, mobile: event.target.value })}
+                  placeholder="请输入手机号"
+                  className={errorField === 'mobile' ? 'input-invalid' : undefined}
+                  aria-invalid={errorField === 'mobile'}
+                  aria-describedby={errorField === 'mobile' ? 'auth-mobile-error' : undefined}
+                />
+                {errorField === 'mobile' && <p className="field-error" id="auth-mobile-error" role="alert">{notice}</p>}
+              </label>
+              <fieldset className="auth-role-field">
+                <legend>注册身份</legend>
+                <label className={credentials.role === 'FARMER' ? 'role-option selected' : 'role-option'}>
+                  <input
+                    type="radio"
+                    name="registration-role"
+                    value="FARMER"
+                    checked={credentials.role === 'FARMER'}
+                    onChange={() => onCredentialsChange({ ...credentials, role: 'FARMER' })}
+                  />
+                  <span>农户</span>
+                  <small>管理地块与种植</small>
+                </label>
+                <label className={credentials.role === 'CUSTOMER' ? 'role-option selected' : 'role-option'}>
+                  <input
+                    type="radio"
+                    name="registration-role"
+                    value="CUSTOMER"
+                    checked={credentials.role === 'CUSTOMER'}
+                    onChange={() => onCredentialsChange({ ...credentials, role: 'CUSTOMER' })}
+                  />
+                  <span>顾客</span>
+                  <small>浏览农产品并提交采购意向</small>
+                </label>
+              </fieldset>
+            </>
           )}
           <label>
             密码
@@ -121,7 +124,6 @@ export function LoginPage({
             {errorField === 'password' && <p className="field-error" id="auth-password-error" role="alert">{notice}</p>}
           </label>
           {connectionError && <p className="auth-connection-error" role="alert">{connectionError}</p>}
-          {hint && <p className="inline-hint">{hint}</p>}
           <button className="primary-button" disabled={busy}>
             {busy ? '处理中...' : authMode === 'login' ? '进入看板' : '注册并登录'}
           </button>

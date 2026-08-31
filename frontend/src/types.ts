@@ -12,6 +12,10 @@ export type User = {
   knowledgeReliance?: string | null;
 };
 
+export type RegistrationRole = 'FARMER' | 'CUSTOMER';
+
+export type Quantity = number | string;
+
 export type Plot = {
   id: number;
   code: string;
@@ -121,6 +125,16 @@ export type CommandItem = {
   status: string;
   operatorName: string;
   createdAt: string;
+};
+
+export type AdminCommand = CommandItem & {
+  plotId?: number;
+  deviceId?: number;
+  deviceName?: string | null;
+  requestPayload?: unknown;
+  ackPayload?: unknown;
+  errorMessage?: string | null;
+  acknowledgedAt?: string | null;
 };
 
 export type ThresholdRuleCreateInput = {
@@ -325,4 +339,138 @@ export type AdminPlotLatest = {
   soilMoisture?: number | null;
   temperature?: number | null;
   light?: number | null;
+};
+
+export type AdminWarehouse = {
+  id: number;
+  name: string;
+  location?: string | null;
+  managerName?: string | null;
+  remark?: string | null;
+  itemCount: number;
+  lowStockCount: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AdminWarehouseItem = {
+  id: number;
+  warehouseId: number;
+  warehouseName: string;
+  name: string;
+  category: string;
+  unit: string;
+  quantity: number;
+  safetyStock?: number | null;
+  remark?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AdminWarehouseStockLog = {
+  id: number;
+  warehouseId: number;
+  warehouseName: string;
+  itemId: number;
+  itemName: string;
+  action: 'IN' | 'OUT' | 'SET' | string;
+  changeQuantity: number;
+  beforeQuantity: number;
+  afterQuantity: number;
+  reason?: string | null;
+  operatorId: number;
+  operatorName: string;
+  createdAt: string;
+};
+
+// ---------------- 二阶段仓储与采购意向（/api/v1/*） ----------------
+
+export type MasterStatus = 'ACTIVE' | 'DISABLED' | 'DELETED' | string;
+
+export type Material = {
+  id: number;
+  name: string;
+  category: string;
+  unit: string;
+  spec?: string | null;
+  status: MasterStatus;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export type Warehouse = {
+  id: number;
+  name: string;
+  location?: string | null;
+  status: MasterStatus;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export type StockView = {
+  stockId: number;
+  warehouseId: number;
+  warehouseName: string;
+  materialId: number;
+  materialName: string;
+  unit: string;
+  totalQuantity: Quantity;
+  reservedQuantity: Quantity;
+  availableQuantity: Quantity;
+};
+
+export type StockRecord = {
+  id: number;
+  warehouseId: number;
+  warehouseName: string;
+  materialId: number;
+  materialName: string;
+  unit: string;
+  type: 'IN' | 'OUT' | string;
+  quantity: Quantity;
+  refType: 'HARVEST' | 'ORDER' | 'ADJUSTMENT' | string;
+  refId: string;
+  plotId?: number | null;
+  operatorId?: number;
+  remark?: string | null;
+  createdAt?: string;
+};
+
+export type MarketMaterial = {
+  id: number;
+  name: string;
+  category: string;
+  unit: string;
+  spec?: string | null;
+  availableQuantity: Quantity;
+  totalQuantity?: Quantity;
+};
+
+export type OrderStatus = 'PENDING' | 'APPROVED' | 'TRADING' | 'CONFIRMED' | 'CLOSED' | 'REJECTED' | 'DELETED' | string;
+
+export type OrderItem = {
+  id?: number;
+  materialId: number;
+  materialName?: string;
+  unit?: string;
+  quantity: Quantity;
+  actualQuantity?: Quantity | null;
+  availableQuantity?: Quantity | null;
+};
+
+export type Order = {
+  id: number;
+  orderNo: string;
+  status: OrderStatus;
+  customerId: number;
+  customerName?: string | null;
+  expectedTime?: string | null;
+  remark?: string | null;
+  items: OrderItem[];
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export type OrderDetail = Order & {
+  items: OrderItem[];
 };

@@ -1,10 +1,14 @@
 import type {
+  AdminCommand,
   AdminDeleteResult,
   AdminDevice,
   AdminKnowledgeDoc,
   AdminPlot,
   AdminPlotLatest,
   AdminUser,
+  AdminWarehouse,
+  AdminWarehouseItem,
+  AdminWarehouseStockLog,
   AgentMessage,
   AgentSession,
   AgentStreamEvent,
@@ -17,6 +21,10 @@ import type {
   EventNotice,
   IrrigationStatus,
   KnowledgeDocument,
+  MarketMaterial,
+  Material,
+  Order,
+  OrderDetail,
   PageResult,
   Plot,
   TelemetryHistory,
@@ -26,7 +34,11 @@ import type {
   ThresholdRule,
   ThresholdSync,
   ThresholdUpdateResult,
-  User
+  User,
+  Warehouse,
+  StockRecord,
+  StockView,
+  RegistrationRole
 } from './types';
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '');
@@ -88,7 +100,7 @@ function query(params: Record<string, string | number | undefined | null>) {
 }
 
 export const api = {
-  register: (payload: { mobile: string; username: string; password: string }) =>
+  register: (payload: { mobile: string; username: string; password: string; role?: RegistrationRole }) =>
     request<{ user: User }>('/api/v1/auth/register', { method: 'POST', body: JSON.stringify(payload) }),
   login: (payload: { username: string; password: string }) =>
     request<{ accessToken: string; expiresIn: number; user: User }>('/api/v1/auth/login', {
@@ -207,7 +219,92 @@ export const api = {
   approveKnowledgeDoc: (docId: number) =>
     request<KnowledgeDocument>(`/api/v1/knowledge/docs/${docId}/approve`, { method: 'POST' }),
   publishKnowledgeDoc: (docId: number) =>
-    request<KnowledgeDocument>(`/api/v1/knowledge/docs/${docId}/publish`, { method: 'POST' })
+    request<KnowledgeDocument>(`/api/v1/knowledge/docs/${docId}/publish`, { method: 'POST' }),
+  adminWarehouses: (params: { keyword?: string; page?: number; pageSize?: number } = {}) =>
+    request<PageResult<AdminWarehouse>>(`/api/v1/admin/warehouses${query({ page: 1, pageSize: 100, ...params })}`),
+  adminCreateWarehouse: (payload: { name: string; location?: string; managerName?: string; remark?: string }) =>
+    request<AdminWarehouse>('/api/v1/admin/warehouses', { method: 'POST', body: JSON.stringify(payload) }),
+  adminWarehouseItems: (params: { warehouseId?: number; keyword?: string; page?: number; pageSize?: number } = {}) =>
+    request<PageResult<AdminWarehouseItem>>(`/api/v1/admin/warehouse-items${query({ page: 1, pageSize: 100, ...params })}`),
+  adminCreateWarehouseItem: (payload: {
+    warehouseId: number;
+    name: string;
+    category: string;
+    unit: string;
+    initialQuantity?: number;
+    safetyStock?: number;
+    remark?: string;
+  }) =>
+    request<AdminWarehouseItem>('/api/v1/admin/warehouse-items', { method: 'POST', body: JSON.stringify(payload) }),
+  adminAdjustWarehouseStock: (itemId: number, payload: { action: 'IN' | 'OUT' | 'SET'; quantity: number; reason?: string }) =>
+    request<AdminWarehouseStockLog>(`/api/v1/admin/warehouse-items/${itemId}/stock`, {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    }),
+  adminWarehouseStockLogs: (params: { warehouseId?: number; itemId?: number; page?: number; pageSize?: number } = {}) =>
+    request<PageResult<AdminWarehouseStockLog>>(`/api/v1/admin/warehouse-stock-logs${query({ page: 1, pageSize: 30, ...params })}`),
+  adminCommands: (params: {
+    plotId?: number;
+    deviceId?: number;
+    status?: string;
+    action?: string;
+    startAt?: string;
+    endAt?: string;
+    page?: number;
+    pageSize?: number;
+  } = {}) =>
+    request<PageResult<AdminCommand>>(`/api/v1/admin/commands${query({ page: 1, pageSize: 50, ...params })}`),
+  adminCommand: (commandId: string) => request<AdminCommand>(`/api/v1/admin/commands/${encodeURIComponent(commandId)}`),
+
+  // ---------------- 二阶段仓储与采购意向 ----------------
+  materials: (params: { keyword?: string; status?: string; page?: number; pageSize?: number } = {}) =>
+    request<PageResult<Material>>(`/api/v1/materials${query({ page: 1, pageSize: 100, ...params })}`),
+  createMaterial: (payload: { name: string; category: string; unit: string; spec?: string; status?: string }) =>
+    request<Material>('/api/v1/materials', { method: 'POST', body: JSON.stringify(payload) }),
+  updateMaterial: (materialId: number, payload: { name: string; category: string; unit: string; spec?: string; status?: string }) =>
+    request<Material>(`/api/v1/materials/${materialId}`, { method: 'PUT', body: JSON.stringify(payload) }),
+  deleteMaterial: (materialId: number) => request<{ id: number }>(`/api/v1/materials/${materialId}`, { method: 'DELETE' }),
+  warehouses: (params: { keyword?: string; status?: string; page?: number; pageSize?: number } = {}) =>
+    request<PageResult<Warehouse>>(`/api/v1/warehouses${query({ page: 1, pageSize: 100, ...params })}`),
+  createWarehouse: (payload: { name: string; location?: string; status?: string }) =>
+    request<Warehouse>('/api/v1/warehouses', { method: 'POST', body: JSON.stringify(payload) }),
+  updateWarehouse: (warehouseId: number, payload: { name: string; location?: string; status?: string }) =>
+    request<Warehouse>(`/api/v1/warehouses/${warehouseId}`, { method: 'PUT', body: JSON.stringify(payload) }),
+  deleteWarehouse: (warehouseId: number) => request<{ id: number }>(`/api/v1/warehouses/${warehouseId}`, { method: 'DELETE' }),
+  stocks: (params: { warehouseId?: number; materialId?: number; page?: number; pageSize?: number } = {}) =>
+    request<PageResult<StockView>>(`/api/v1/stocks${query({ page: 1, pageSize: 100, ...params })}`),
+  stockRecords: (params: {
+    warehouseId?: number;
+    materialId?: number;
+    plotId?: number;
+    type?: string;
+    startAt?: string;
+    endAt?: string;
+    page?: number;
+    pageSize?: number;
+  } = {}) =>
+    request<PageResult<StockRecord>>(`/api/v1/stock-records${query({ page: 1, pageSize: 50, ...params })}`),
+  inboundStock: (payload: { warehouseId: number; materialId: number; quantity: number; plotId: number; remark?: string }) =>
+    request<{ recordId: number; stockQuantity: string | number }>('/api/v1/stocks/inbound', {
+      method: 'POST',
+      headers: { 'Idempotency-Key': newIdempotencyKey() },
+      body: JSON.stringify(payload)
+    }),
+  marketMaterials: (params: { page?: number; pageSize?: number } = {}) =>
+    request<PageResult<MarketMaterial>>(`/api/v1/market/materials${query({ page: 1, pageSize: 100, ...params })}`),
+  createMarketMaterial: (payload: { name: string; unit: 'kg' | 't' }) =>
+    request<Material>('/api/v1/market/materials', { method: 'POST', body: JSON.stringify(payload) }),
+  orders: (params: { status?: string; page?: number; pageSize?: number } = {}) =>
+    request<PageResult<Order>>(`/api/v1/orders${query({ page: 1, pageSize: 50, ...params })}`),
+  order: (orderId: number) => request<OrderDetail>(`/api/v1/orders/${orderId}`),
+  createOrder: (payload: { items: Array<{ materialId: number; quantity: number }>; expectedTime?: string; remark?: string }) =>
+    request<Order>('/api/v1/orders', { method: 'POST', body: JSON.stringify(payload) }),
+  reviewOrder: (orderId: number, action: 'approve' | 'reject') =>
+    request<Order>(`/api/v1/orders/${orderId}/review`, { method: 'POST', body: JSON.stringify({ action }) }),
+  terminateOrder: (orderId: number, action: 'cancel' | 'close') =>
+    request<Order>(`/api/v1/orders/${orderId}/terminate`, { method: 'POST', body: JSON.stringify({ action }) }),
+  confirmOrder: (orderId: number, payload: { items: Array<{ materialId: number; quantity: number }> }) =>
+    request<Order>(`/api/v1/orders/${orderId}/confirm`, { method: 'POST', body: JSON.stringify(payload) })
 };
 
 export async function streamAgentChat(

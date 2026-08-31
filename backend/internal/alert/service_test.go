@@ -58,9 +58,8 @@ func (s *alertStoreStub) ListAlertsByOwner(_ context.Context, ownerID uint64, fi
 	return s.rows, s.total, s.err
 }
 
-func (s *alertStoreStub) AdminListAlerts(_ context.Context, filter ListFilter) ([]AlertListRow, int64, error) {
-	s.filter = filter
-	return s.rows, s.total, s.err
+func (s *alertStoreStub) AdminListAlerts(ctx context.Context, filter ListFilter) ([]AlertListRow, int64, error) {
+	return s.ListAlertsByOwner(ctx, 0, filter)
 }
 
 func (s *alertStoreStub) ConfirmAlertByOwner(_ context.Context, ownerID, alertID uint64, remark string, now time.Time) (*Alert, error) {

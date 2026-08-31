@@ -119,13 +119,12 @@ func (s *OrderService) buildViews(ctx context.Context, headers []OrderHeader, it
 	return views, nil
 }
 
-// CreateOrder 发意向：校验可售数量，创建 PENDING 订单与明细。
+// CreateOrder 发意向：仅记录需求，库存将在实际成交扣库时校验。
 func (s *OrderService) CreateOrder(ctx context.Context, customerID uint64, expectedTime *time.Time, remark string, items []OrderItemInput) (*OrderHeader, error) {
 	if customerID == 0 || len(items) == 0 {
 		return nil, ErrInvalidInput
 	}
 	orderItems := make([]OrderItem, 0, len(items))
-	ids := make([]uint64, 0, len(items))
 	seen := make(map[uint64]struct{}, len(items))
 	for _, item := range items {
 		if item.MaterialID == 0 || !validQuantity(item.Quantity) {
@@ -136,22 +135,6 @@ func (s *OrderService) CreateOrder(ctx context.Context, customerID uint64, expec
 		}
 		seen[item.MaterialID] = struct{}{}
 		orderItems = append(orderItems, OrderItem{MaterialID: item.MaterialID, Quantity: item.Quantity})
-		ids = append(ids, item.MaterialID)
-	}
-
-	totals, err := s.repository.StockTotalsByMaterials(ctx, ids)
-	if err != nil {
-		return nil, err
-	}
-	reserved, err := s.repository.ReservedByMaterials(ctx, ids)
-	if err != nil {
-		return nil, err
-	}
-	for _, item := range orderItems {
-		available := decimalOrZero(totals, item.MaterialID).Sub(decimalOrZero(reserved, item.MaterialID))
-		if available.LessThan(item.Quantity) {
-			return nil, ErrInsufficientStock
-		}
 	}
 
 	order := &OrderHeader{

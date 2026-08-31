@@ -1,8 +1,8 @@
 import {
   AlertTriangle,
-  ArrowLeft,
   BookOpen,
   CheckCircle2,
+  ClipboardList,
   FileText,
   LayoutDashboard,
   Loader2,
@@ -10,24 +10,41 @@ import {
   Plus,
   RefreshCw,
   Search,
+  ShoppingCart,
   Trash2,
   Users,
+  Warehouse,
   X
 } from 'lucide-react';
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import { api, ApiError } from '../../api';
-import type { AdminDevice, AdminKnowledgeDoc, AdminPlot, AdminPlotLatest, AdminUser } from '../../types';
+import { CommandLibraryPage } from './CommandLibraryPage';
+import { OrderManagementPage } from './OrderManagementPage';
+import { WarehouseManagementPage } from './WarehouseManagementPage';
+import type {
+  AdminDevice,
+  AdminKnowledgeDoc,
+  AdminPlot,
+  AdminPlotLatest,
+  AdminUser,
+  AdminWarehouseItem
+} from '../../types';
 
-type AdminSection = 'overview' | 'users' | 'plots' | 'knowledge' | 'devices' | 'alerts';
+type AdminSection = 'overview' | 'users' | 'plots' | 'knowledge' | 'devices' | 'alerts' | 'warehouse' | 'orders' | 'commands';
 
 const ADMIN_SECTIONS: Array<{ key: AdminSection; label: string; icon: React.ReactNode }> = [
   { key: 'overview', label: '总览', icon: <LayoutDashboard size={17} /> },
   { key: 'users', label: '用户管理', icon: <Users size={17} /> },
   { key: 'plots', label: '地块管理', icon: <Map size={17} /> },
   { key: 'alerts', label: '报警记录', icon: <AlertTriangle size={17} /> },
+  { key: 'warehouse', label: '仓储管理', icon: <Warehouse size={17} /> },
+  { key: 'orders', label: '订单管理', icon: <ShoppingCart size={17} /> },
+  { key: 'commands', label: '命令库', icon: <ClipboardList size={17} /> },
   { key: 'knowledge', label: '文件审批', icon: <BookOpen size={17} /> },
   { key: 'devices', label: '设备管理', icon: <FileText size={17} /> }
 ];
+
+const WAREHOUSE_MANAGER_SECTIONS = ADMIN_SECTIONS.filter((item) => item.key === 'warehouse' || item.key === 'orders');
 
 const DOC_STATUS_NAMES: Record<string, string> = {
   DRAFT: '待审核',
@@ -38,14 +55,31 @@ const DOC_STATUS_NAMES: Record<string, string> = {
 
 type PlotFormErrors = Partial<Record<'code' | 'name' | 'ownerId' | 'area' | 'form', string>>;
 type DeviceBindErrors = Partial<Record<'sn' | 'name' | 'type' | 'plotId' | 'form', string>>;
+type WarehouseFormErrors = Partial<Record<
+  'warehouseId' | 'name' | 'location' | 'managerName' | 'category' | 'unit' | 'initialQuantity' | 'safetyStock' | 'quantity' | 'reason' | 'form',
+  string
+>>;
 
 export function AdminPanel(props: {
   user: { id: number; name: string; role?: string } | null;
-  onBack: () => void;
   onLogout: () => void;
 }) {
-  const [section, setSection] = useState<AdminSection>('overview');
+  const isWarehouseManager = props.user?.role === 'WAREHOUSE_MANAGER';
+  const [section, setSection] = useState<AdminSection>(isWarehouseManager ? 'warehouse' : 'overview');
   const isAdmin = props.user?.role === 'SYSTEM_ADMIN';
+  const visibleSections = isWarehouseManager ? WAREHOUSE_MANAGER_SECTIONS : ADMIN_SECTIONS;
+
+  useEffect(() => {
+    if (!visibleSections.some((item) => item.key === section)) {
+      setSection(visibleSections[0]?.key ?? 'overview');
+    }
+  }, [section, visibleSections]);
+
+  const roleLabel = isWarehouseManager
+    ? '仓库管理员控制面板'
+    : isAdmin
+      ? '系统管理员控制面板'
+      : '技术员控制面板';
 
   return (
     <div className="admin-shell">
@@ -55,7 +89,7 @@ export function AdminPanel(props: {
           <span>{props.user?.name ?? '管理员'}</span>
         </div>
         <nav className="admin-nav">
-          {ADMIN_SECTIONS.map((item) => (
+          {visibleSections.map((item) => (
             <button
               key={item.key}
               className={section === item.key ? 'active' : ''}
@@ -67,23 +101,22 @@ export function AdminPanel(props: {
           ))}
         </nav>
         <div className="admin-sidebar-footer">
-          <button onClick={props.onBack}>
-            <ArrowLeft size={16} />
-            返回手机端
-          </button>
           <button onClick={props.onLogout}>退出登录</button>
         </div>
       </aside>
       <main className="admin-main">
         <header className="admin-topbar">
-          <h1>{ADMIN_SECTIONS.find((item) => item.key === section)?.label}</h1>
-          <span className="admin-topbar-sub">{isAdmin ? '系统管理员控制面板' : '技术员控制面板'}</span>
+          <h1>{visibleSections.find((item) => item.key === section)?.label}</h1>
+          <span className="admin-topbar-sub">{roleLabel}</span>
         </header>
         <div className="admin-content">
           {section === 'overview' && <AdminOverview />}
           {section === 'users' && <AdminUsers />}
           {section === 'plots' && <AdminPlots isAdmin={isAdmin} />}
           {section === 'alerts' && <AdminAlerts />}
+          {section === 'warehouse' && <WarehouseManagementPage />}
+          {section === 'orders' && <OrderManagementPage />}
+          {section === 'commands' && isAdmin && <CommandLibraryPage />}
           {section === 'knowledge' && <AdminKnowledge isAdmin={isAdmin} />}
           {section === 'devices' && <AdminDevices isAdmin={isAdmin} />}
         </div>
@@ -1067,6 +1100,541 @@ function AdminDevices({ isAdmin }: { isAdmin: boolean }) {
   );
 }
 
+// ---------------- 仓储管理 ----------------
+
+type StockAction = 'IN' | 'OUT' | 'SET';
+
+const STOCK_ACTION_NAMES: Record<StockAction, string> = {
+  IN: '入库',
+  OUT: '出库',
+  SET: '盘点'
+};
+
+function AdminWarehouse({ isAdmin }: { isAdmin: boolean }) {
+  const [keyword, setKeyword] = useState('');
+  const [warehouseId, setWarehouseId] = useState('');
+  const [query, setQuery] = useState<{ keyword?: string; warehouseId?: number }>({});
+  const warehouses = useAdminLoader(() => api.adminWarehouses({ pageSize: 100 }), []);
+  const items = useAdminLoader(() => api.adminWarehouseItems({ ...query, pageSize: 100 }), [query]);
+  const stockLogs = useAdminLoader(
+    () => api.adminWarehouseStockLogs({ warehouseId: query.warehouseId, pageSize: 20 }),
+    [query.warehouseId]
+  );
+  const [createWarehouseOpen, setCreateWarehouseOpen] = useState(false);
+  const [createItemOpen, setCreateItemOpen] = useState(false);
+  const [adjusting, setAdjusting] = useState<{ item: AdminWarehouseItem; action: StockAction } | null>(null);
+  const [notice, setNotice] = useState('');
+  const [noticeError, setNoticeError] = useState(false);
+
+  const warehouseOptions = warehouses.data?.items ?? [];
+
+  function refreshAll() {
+    warehouses.refresh();
+    items.refresh();
+    stockLogs.refresh();
+  }
+
+  function submitSearch(event: FormEvent) {
+    event.preventDefault();
+    setQuery({
+      keyword: keyword.trim() || undefined,
+      warehouseId: warehouseId ? Number(warehouseId) : undefined
+    });
+  }
+
+  function showNotice(message: string, isError = false) {
+    setNotice(message);
+    setNoticeError(isError);
+  }
+
+  return (
+    <div className="admin-stack">
+      {notice && <div className={`admin-notice${noticeError ? ' error' : ''}`}>{notice}</div>}
+      <section className="admin-card">
+        <div className="admin-card-heading">
+          <div>
+            <h3>仓库概览</h3>
+            <p className="admin-card-copy">按仓库查看物资数量与低库存提醒。</p>
+          </div>
+          {isAdmin && (
+            <button type="button" className="admin-heading-action" onClick={() => setCreateWarehouseOpen(true)}>
+              <Plus size={15} />
+              新建仓库
+            </button>
+          )}
+        </div>
+        <AdminState loading={warehouses.loading} error={warehouses.error}>
+          <div className="admin-table-wrap">
+            <table className="admin-table">
+              <thead>
+                <tr>
+                  <th>仓库</th>
+                  <th>位置</th>
+                  <th>负责人</th>
+                  <th>物资种类</th>
+                  <th>低库存</th>
+                  <th>更新时间</th>
+                </tr>
+              </thead>
+              <tbody>
+                {warehouseOptions.map((warehouse) => (
+                  <tr key={warehouse.id}>
+                    <td className="admin-strong">{warehouse.name}</td>
+                    <td>{warehouse.location || '--'}</td>
+                    <td>{warehouse.managerName || '--'}</td>
+                    <td>{warehouse.itemCount}</td>
+                    <td>
+                      <span className={`admin-badge ${warehouse.lowStockCount > 0 ? 'warn' : 'ok'}`}>
+                        {warehouse.lowStockCount > 0 ? `${warehouse.lowStockCount} 项需关注` : '库存正常'}
+                      </span>
+                    </td>
+                    <td>{formatDateTime(warehouse.updatedAt)}</td>
+                  </tr>
+                ))}
+                {warehouseOptions.length === 0 && (
+                  <tr>
+                    <td colSpan={6} className="admin-empty">暂无仓库。{isAdmin ? '请先新建仓库。' : ''}</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </AdminState>
+      </section>
+
+      <form className="admin-filter-bar" onSubmit={submitSearch}>
+        <div className="admin-search">
+          <Search size={16} />
+          <input value={keyword} onChange={(event) => setKeyword(event.target.value)} placeholder="物资名称 / 分类" />
+        </div>
+        <select value={warehouseId} onChange={(event) => setWarehouseId(event.target.value)}>
+          <option value="">全部仓库</option>
+          {warehouseOptions.map((warehouse) => (
+            <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>
+          ))}
+        </select>
+        <button type="submit">查询</button>
+        <button type="button" className="ghost" onClick={refreshAll} title="刷新">
+          <RefreshCw size={15} />
+        </button>
+        {isAdmin && (
+          <button
+            type="button"
+            className="primary"
+            onClick={() => setCreateItemOpen(true)}
+            disabled={warehouseOptions.length === 0}
+            title={warehouseOptions.length === 0 ? '请先新建仓库' : undefined}
+          >
+            <Plus size={15} />
+            登记物资
+          </button>
+        )}
+      </form>
+
+      <AdminState loading={items.loading} error={items.error}>
+        <section className="admin-card">
+          <h3>库存明细</h3>
+          <div className="admin-table-wrap">
+            <table className="admin-table">
+              <thead>
+                <tr>
+                  <th>物资</th>
+                  <th>仓库</th>
+                  <th>分类</th>
+                  <th>当前库存</th>
+                  <th>安全库存</th>
+                  <th>状态</th>
+                  <th>更新时间</th>
+                  {isAdmin && <th>操作</th>}
+                </tr>
+              </thead>
+              <tbody>
+                {(items.data?.items ?? []).map((item) => {
+                  const isLowStock = item.safetyStock != null && item.quantity <= item.safetyStock;
+                  return (
+                    <tr key={item.id}>
+                      <td className="admin-strong">{item.name}</td>
+                      <td>{item.warehouseName}</td>
+                      <td>{item.category}</td>
+                      <td>{formatStock(item.quantity)} {item.unit}</td>
+                      <td>{item.safetyStock == null ? '--' : `${formatStock(item.safetyStock)} ${item.unit}`}</td>
+                      <td>
+                        <span className={`admin-badge ${isLowStock ? 'warn' : 'ok'}`}>
+                          {item.safetyStock == null ? '未设置预警' : isLowStock ? '库存偏低' : '充足'}
+                        </span>
+                      </td>
+                      <td>{formatDateTime(item.updatedAt)}</td>
+                      {isAdmin && (
+                        <td className="admin-actions">
+                          <button className="admin-link-btn" onClick={() => setAdjusting({ item, action: 'IN' })}>入库</button>
+                          <button className="admin-link-btn" onClick={() => setAdjusting({ item, action: 'OUT' })}>出库</button>
+                          <button className="admin-link-btn" onClick={() => setAdjusting({ item, action: 'SET' })}>盘点</button>
+                        </td>
+                      )}
+                    </tr>
+                  );
+                })}
+                {(items.data?.items ?? []).length === 0 && (
+                  <tr>
+                    <td colSpan={isAdmin ? 8 : 7} className="admin-empty">暂无符合条件的库存物资。</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </AdminState>
+
+      <AdminState loading={stockLogs.loading} error={stockLogs.error}>
+        <section className="admin-card">
+          <h3>最近库存流水</h3>
+          <div className="admin-table-wrap">
+            <table className="admin-table">
+              <thead>
+                <tr>
+                  <th>时间</th>
+                  <th>仓库</th>
+                  <th>物资</th>
+                  <th>操作</th>
+                  <th>变动</th>
+                  <th>操作后库存</th>
+                  <th>操作人</th>
+                  <th>备注</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(stockLogs.data?.items ?? []).map((log) => (
+                  <tr key={log.id}>
+                    <td>{formatDateTime(log.createdAt)}</td>
+                    <td>{log.warehouseName}</td>
+                    <td className="admin-strong">{log.itemName}</td>
+                    <td><span className={`admin-badge ${log.action === 'OUT' ? 'warn' : log.action === 'SET' ? 'admin' : 'ok'}`}>{STOCK_ACTION_NAMES[log.action as StockAction] ?? log.action}</span></td>
+                    <td className={log.changeQuantity < 0 ? 'admin-stock-out' : 'admin-stock-in'}>{formatStockChange(log.changeQuantity)}</td>
+                    <td>{formatStock(log.afterQuantity)}</td>
+                    <td>{log.operatorName || '--'}</td>
+                    <td className="admin-ellipsis" title={log.reason || ''}>{log.reason || '--'}</td>
+                  </tr>
+                ))}
+                {(stockLogs.data?.items ?? []).length === 0 && (
+                  <tr>
+                    <td colSpan={8} className="admin-empty">暂无库存变动记录。</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </AdminState>
+
+      {createWarehouseOpen && (
+        <CreateWarehouseModal
+          onClose={() => setCreateWarehouseOpen(false)}
+          onCreated={async () => {
+            setCreateWarehouseOpen(false);
+            showNotice('仓库已创建');
+            refreshAll();
+          }}
+        />
+      )}
+      {createItemOpen && (
+        <CreateWarehouseItemModal
+          warehouses={warehouseOptions}
+          onClose={() => setCreateItemOpen(false)}
+          onCreated={async () => {
+            setCreateItemOpen(false);
+            showNotice('物资已登记');
+            refreshAll();
+          }}
+        />
+      )}
+      {adjusting && (
+        <AdjustWarehouseStockModal
+          item={adjusting.item}
+          action={adjusting.action}
+          onClose={() => setAdjusting(null)}
+          onAdjusted={async () => {
+            setAdjusting(null);
+            showNotice(`${STOCK_ACTION_NAMES[adjusting.action]}已完成`);
+            refreshAll();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function CreateWarehouseModal(props: { onClose: () => void; onCreated: () => Promise<void> }) {
+  const [name, setName] = useState('');
+  const [location, setLocation] = useState('');
+  const [managerName, setManagerName] = useState('');
+  const [remark, setRemark] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [fieldErrors, setFieldErrors] = useState<WarehouseFormErrors>({});
+
+  function clearFieldError(field: keyof WarehouseFormErrors) {
+    setFieldErrors((current) => {
+      if (!current[field] && !current.form) return current;
+      const next = { ...current };
+      delete next[field];
+      delete next.form;
+      return next;
+    });
+  }
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    const errors: WarehouseFormErrors = {};
+    if (!name.trim()) errors.name = '请输入仓库名称。';
+    if (location.trim().length > 255) errors.location = '仓库位置不能超过 255 个字符。';
+    if (managerName.trim().length > 64) errors.managerName = '负责人不能超过 64 个字符。';
+    if (remark.trim().length > 500) errors.form = '备注不能超过 500 个字符。';
+    if (Object.keys(errors).length > 0) {
+      setFieldErrors(errors);
+      return;
+    }
+    setFieldErrors({});
+    setBusy(true);
+    try {
+      await api.adminCreateWarehouse({
+        name: name.trim(),
+        location: location.trim() || undefined,
+        managerName: managerName.trim() || undefined,
+        remark: remark.trim() || undefined
+      });
+      await props.onCreated();
+    } catch (error) {
+      setFieldErrors(warehouseFormErrorFor(errorMessage(error)));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="admin-modal-mask">
+      <form className="admin-modal" onSubmit={submit} noValidate>
+        <header>
+          <h3>新建仓库</h3>
+          <button type="button" onClick={props.onClose} title="关闭"><X size={18} /></button>
+        </header>
+        <label>
+          仓库名称 *
+          <input value={name} onChange={(event) => { setName(event.target.value); clearFieldError('name'); }} placeholder="如 一号农资仓" className={fieldErrors.name ? 'input-invalid' : undefined} />
+          {fieldErrors.name && <p className="field-error" role="alert">{fieldErrors.name}</p>}
+        </label>
+        <label>
+          仓库位置
+          <input value={location} onChange={(event) => { setLocation(event.target.value); clearFieldError('location'); }} placeholder="如 园区北侧" className={fieldErrors.location ? 'input-invalid' : undefined} />
+          {fieldErrors.location && <p className="field-error" role="alert">{fieldErrors.location}</p>}
+        </label>
+        <label>
+          负责人
+          <input value={managerName} onChange={(event) => { setManagerName(event.target.value); clearFieldError('managerName'); }} placeholder="请输入负责人姓名" className={fieldErrors.managerName ? 'input-invalid' : undefined} />
+          {fieldErrors.managerName && <p className="field-error" role="alert">{fieldErrors.managerName}</p>}
+        </label>
+        <label>
+          备注
+          <input value={remark} onChange={(event) => { setRemark(event.target.value); clearFieldError('form'); }} placeholder="选填" />
+        </label>
+        {fieldErrors.form && <p className="field-error admin-form-error" role="alert">{fieldErrors.form}</p>}
+        <footer>
+          <button type="button" onClick={props.onClose}>取消</button>
+          <button type="submit" className="primary" disabled={busy}>{busy ? '创建中…' : '创建仓库'}</button>
+        </footer>
+      </form>
+    </div>
+  );
+}
+
+function CreateWarehouseItemModal(props: {
+  warehouses: Array<{ id: number; name: string }>;
+  onClose: () => void;
+  onCreated: () => Promise<void>;
+}) {
+  const [warehouseId, setWarehouseId] = useState(String(props.warehouses[0]?.id ?? ''));
+  const [name, setName] = useState('');
+  const [category, setCategory] = useState('');
+  const [unit, setUnit] = useState('');
+  const [initialQuantity, setInitialQuantity] = useState('0');
+  const [safetyStock, setSafetyStock] = useState('');
+  const [remark, setRemark] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [fieldErrors, setFieldErrors] = useState<WarehouseFormErrors>({});
+
+  function clearFieldError(field: keyof WarehouseFormErrors) {
+    setFieldErrors((current) => {
+      if (!current[field] && !current.form) return current;
+      const next = { ...current };
+      delete next[field];
+      delete next.form;
+      return next;
+    });
+  }
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    const initial = Number(initialQuantity || 0);
+    const safety = safetyStock.trim() ? Number(safetyStock) : undefined;
+    const errors: WarehouseFormErrors = {};
+    if (!warehouseId) errors.warehouseId = '请选择仓库。';
+    if (!name.trim()) errors.name = '请输入物资名称。';
+    if (!category.trim()) errors.category = '请输入物资分类。';
+    if (!unit.trim()) errors.unit = '请输入计量单位。';
+    if (!Number.isFinite(initial) || initial < 0) errors.initialQuantity = '请输入不小于 0 的初始库存。';
+    if (safety !== undefined && (!Number.isFinite(safety) || safety < 0)) errors.safetyStock = '请输入不小于 0 的安全库存。';
+    if (remark.trim().length > 500) errors.form = '备注不能超过 500 个字符。';
+    if (Object.keys(errors).length > 0) {
+      setFieldErrors(errors);
+      return;
+    }
+    setFieldErrors({});
+    setBusy(true);
+    try {
+      await api.adminCreateWarehouseItem({
+        warehouseId: Number(warehouseId), name: name.trim(), category: category.trim(), unit: unit.trim(),
+        initialQuantity: initial, safetyStock: safety, remark: remark.trim() || undefined
+      });
+      await props.onCreated();
+    } catch (error) {
+      setFieldErrors(warehouseFormErrorFor(errorMessage(error)));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="admin-modal-mask">
+      <form className="admin-modal" onSubmit={submit} noValidate>
+        <header>
+          <h3>登记物资</h3>
+          <button type="button" onClick={props.onClose} title="关闭"><X size={18} /></button>
+        </header>
+        <label>
+          所属仓库 *
+          <select value={warehouseId} onChange={(event) => { setWarehouseId(event.target.value); clearFieldError('warehouseId'); }} className={fieldErrors.warehouseId ? 'input-invalid' : undefined}>
+            <option value="">请选择仓库</option>
+            {props.warehouses.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}
+          </select>
+          {fieldErrors.warehouseId && <p className="field-error" role="alert">{fieldErrors.warehouseId}</p>}
+        </label>
+        <label>
+          物资名称 *
+          <input value={name} onChange={(event) => { setName(event.target.value); clearFieldError('name'); }} placeholder="如 水溶肥" className={fieldErrors.name ? 'input-invalid' : undefined} />
+          {fieldErrors.name && <p className="field-error" role="alert">{fieldErrors.name}</p>}
+        </label>
+        <div className="admin-modal-grid">
+          <label>
+            分类 *
+            <input value={category} onChange={(event) => { setCategory(event.target.value); clearFieldError('category'); }} placeholder="如 肥料" className={fieldErrors.category ? 'input-invalid' : undefined} />
+            {fieldErrors.category && <p className="field-error" role="alert">{fieldErrors.category}</p>}
+          </label>
+          <label>
+            单位 *
+            <input value={unit} onChange={(event) => { setUnit(event.target.value); clearFieldError('unit'); }} placeholder="如 kg" className={fieldErrors.unit ? 'input-invalid' : undefined} />
+            {fieldErrors.unit && <p className="field-error" role="alert">{fieldErrors.unit}</p>}
+          </label>
+        </div>
+        <div className="admin-modal-grid">
+          <label>
+            初始库存
+            <input type="number" min="0" step="0.01" value={initialQuantity} onChange={(event) => { setInitialQuantity(event.target.value); clearFieldError('initialQuantity'); }} className={fieldErrors.initialQuantity ? 'input-invalid' : undefined} />
+            {fieldErrors.initialQuantity && <p className="field-error" role="alert">{fieldErrors.initialQuantity}</p>}
+          </label>
+          <label>
+            安全库存
+            <input type="number" min="0" step="0.01" value={safetyStock} onChange={(event) => { setSafetyStock(event.target.value); clearFieldError('safetyStock'); }} placeholder="选填" className={fieldErrors.safetyStock ? 'input-invalid' : undefined} />
+            {fieldErrors.safetyStock && <p className="field-error" role="alert">{fieldErrors.safetyStock}</p>}
+          </label>
+        </div>
+        <label>
+          备注
+          <input value={remark} onChange={(event) => { setRemark(event.target.value); clearFieldError('form'); }} placeholder="选填" />
+        </label>
+        {fieldErrors.form && <p className="field-error admin-form-error" role="alert">{fieldErrors.form}</p>}
+        <footer>
+          <button type="button" onClick={props.onClose}>取消</button>
+          <button type="submit" className="primary" disabled={busy}>{busy ? '登记中…' : '登记物资'}</button>
+        </footer>
+      </form>
+    </div>
+  );
+}
+
+function AdjustWarehouseStockModal(props: {
+  item: AdminWarehouseItem;
+  action: StockAction;
+  onClose: () => void;
+  onAdjusted: () => Promise<void>;
+}) {
+  const isSet = props.action === 'SET';
+  const [quantity, setQuantity] = useState(isSet ? String(props.item.quantity) : '');
+  const [reason, setReason] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [fieldErrors, setFieldErrors] = useState<WarehouseFormErrors>({});
+
+  function clearFieldError(field: keyof WarehouseFormErrors) {
+    setFieldErrors((current) => {
+      if (!current[field] && !current.form) return current;
+      const next = { ...current };
+      delete next[field];
+      delete next.form;
+      return next;
+    });
+  }
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    const parsedQuantity = Number(quantity);
+    const errors: WarehouseFormErrors = {};
+    if (!Number.isFinite(parsedQuantity) || parsedQuantity < 0 || (!isSet && parsedQuantity === 0)) {
+      errors.quantity = isSet ? '请输入不小于 0 的盘点后库存。' : '请输入大于 0 的数量。';
+    }
+    if (reason.trim().length > 255) errors.reason = '备注不能超过 255 个字符。';
+    if (Object.keys(errors).length > 0) {
+      setFieldErrors(errors);
+      return;
+    }
+    setFieldErrors({});
+    setBusy(true);
+    try {
+      await api.adminAdjustWarehouseStock(props.item.id, {
+        action: props.action, quantity: parsedQuantity, reason: reason.trim() || undefined
+      });
+      await props.onAdjusted();
+    } catch (error) {
+      setFieldErrors(warehouseFormErrorFor(errorMessage(error)));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="admin-modal-mask">
+      <form className="admin-modal" onSubmit={submit} noValidate>
+        <header>
+          <h3>{STOCK_ACTION_NAMES[props.action]}：{props.item.name}</h3>
+          <button type="button" onClick={props.onClose} title="关闭"><X size={18} /></button>
+        </header>
+        <p className="admin-modal-hint">当前库存：{formatStock(props.item.quantity)} {props.item.unit}</p>
+        <label>
+          {isSet ? '盘点后库存 *' : `${STOCK_ACTION_NAMES[props.action]}数量 *`}
+          <input type="number" min="0" step="0.01" value={quantity} onChange={(event) => { setQuantity(event.target.value); clearFieldError('quantity'); }} className={fieldErrors.quantity ? 'input-invalid' : undefined} />
+          {fieldErrors.quantity && <p className="field-error" role="alert">{fieldErrors.quantity}</p>}
+        </label>
+        <label>
+          备注
+          <input value={reason} onChange={(event) => { setReason(event.target.value); clearFieldError('reason'); }} placeholder={isSet ? '如 月末盘点' : '如 生产领用'} className={fieldErrors.reason ? 'input-invalid' : undefined} />
+          {fieldErrors.reason && <p className="field-error" role="alert">{fieldErrors.reason}</p>}
+        </label>
+        {fieldErrors.form && <p className="field-error admin-form-error" role="alert">{fieldErrors.form}</p>}
+        <footer>
+          <button type="button" onClick={props.onClose}>取消</button>
+          <button type="submit" className="primary" disabled={busy}>{busy ? '提交中…' : `确认${STOCK_ACTION_NAMES[props.action]}`}</button>
+        </footer>
+      </form>
+    </div>
+  );
+}
+
 // ---------------- 报警记录 ----------------
 
 const ALERT_STATUS_NAMES: Record<string, string> = {
@@ -1244,4 +1812,24 @@ function deviceBindErrorFor(message: string): DeviceBindErrors {
   if (/类型|type/.test(normalized)) return { type: message };
   if (/地块|plot/.test(normalized)) return { plotId: message };
   return { form: message };
+}
+
+function warehouseFormErrorFor(message: string): WarehouseFormErrors {
+  const normalized = message.toLowerCase();
+  if (/warehouse|仓库/.test(normalized)) return { warehouseId: message };
+  if (/物资|名称|name/.test(normalized)) return { name: message };
+  if (/分类|category/.test(normalized)) return { category: message };
+  if (/单位|unit/.test(normalized)) return { unit: message };
+  if (/安全库存|初始库存|库存|数量|quantity/.test(normalized)) return { quantity: message };
+  if (/备注|reason|remark/.test(normalized)) return { reason: message };
+  return { form: message };
+}
+
+function formatStock(value: number) {
+  return value.toLocaleString('zh-CN', { maximumFractionDigits: 2 });
+}
+
+function formatStockChange(value: number) {
+  const prefix = value > 0 ? '+' : '';
+  return `${prefix}${formatStock(value)}`;
 }

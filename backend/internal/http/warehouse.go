@@ -65,6 +65,8 @@ func registerWarehouseRoutes(router *gin.Engine, auth authService, service wareh
 	// 收获入库：FARMER 可写（收获通知），仓库管理员/系统管理员可写
 	api.POST("/stocks/inbound", requireAnyRole("FARMER", "WAREHOUSE_MANAGER", "SYSTEM_ADMIN"), h.inbound)
 	api.GET("/stock-records", warehouseRead, h.listRecords)
+	api.GET("/market/materials", h.listMarketMaterials)
+	api.POST("/market/materials", requireAnyRole("CUSTOMER"), h.createMarketMaterial)
 	// 意向订单：登录即可查（FARMER/ADMIN/WAREHOUSE_MANAGER 全量，CUSTOMER 仅自己，handler 内按角色过滤）
 	api.GET("/orders", h.listOrders)
 	api.GET("/orders/:id", h.getOrder)
@@ -82,6 +84,19 @@ type materialRequest struct {
 	Unit     string             `json:"unit"`
 	Spec     *string            `json:"spec"`
 	Status   trade.MasterStatus `json:"status"`
+}
+type marketMaterialRequest struct {
+	Name string `json:"name"`
+	Unit string `json:"unit"`
+}
+type marketMaterialView struct {
+	ID                uint64          `json:"id"`
+	Name              string          `json:"name"`
+	Category          string          `json:"category"`
+	Unit              string          `json:"unit"`
+	Spec              *string         `json:"spec,omitempty"`
+	AvailableQuantity decimal.Decimal `json:"availableQuantity"`
+	TotalQuantity     decimal.Decimal `json:"totalQuantity"`
 }
 type warehouseRequest struct {
 	Name     string             `json:"name"`
@@ -137,6 +152,73 @@ func (h warehouseHandler) createMaterial(c *gin.Context) {
 	}
 	result, err := h.service.CreateMaterial(c.Request.Context(), trade.MaterialInput{Name: r.Name, Category: r.Category, Unit: r.Unit, Spec: r.Spec, Status: r.Status})
 	respondWarehouseCreated(c, result, err)
+}
+func (h warehouseHandler) listMarketMaterials(c *gin.Context) {
+	f, ok := pageFilter(c)
+	if !ok {
+		return
+	}
+	active := trade.StatusActive
+	f.Status = &active
+	materials, err := h.service.ListMaterials(c.Request.Context(), f)
+	if err != nil {
+		respondWarehouseError(c, err)
+		return
+	}
+	stocks, err := h.service.ListStocks(c.Request.Context(), trade.StockFilter{Page: 1, PageSize: 100})
+	if err != nil {
+		respondWarehouseError(c, err)
+		return
+	}
+	totalByMaterial := make(map[uint64]decimal.Decimal, len(stocks.Items))
+	availableByMaterial := make(map[uint64]decimal.Decimal, len(stocks.Items))
+	for _, stock := range stocks.Items {
+		totalByMaterial[stock.MaterialID] = totalByMaterial[stock.MaterialID].Add(stock.TotalQuantity)
+		availableByMaterial[stock.MaterialID] = availableByMaterial[stock.MaterialID].Add(stock.AvailableQuantity)
+	}
+	items := make([]marketMaterialView, 0, len(materials.Items))
+	for _, material := range materials.Items {
+		items = append(items, marketMaterialView{
+			ID: material.ID, Name: material.Name, Category: material.Category, Unit: material.Unit, Spec: material.Spec,
+			TotalQuantity: totalByMaterial[material.ID], AvailableQuantity: availableByMaterial[material.ID],
+		})
+	}
+	respondSuccess(c, http.StatusOK, gin.H{"items": items, "page": materials.Page, "pageSize": materials.PageSize, "total": materials.Total})
+}
+func (h warehouseHandler) createMarketMaterial(c *gin.Context) {
+	var r marketMaterialRequest
+	if !bindWarehouseJSON(c, &r) {
+		return
+	}
+	r.Name = strings.TrimSpace(r.Name)
+	r.Unit = strings.ToLower(strings.TrimSpace(r.Unit))
+	if r.Unit != "kg" && r.Unit != "t" {
+		respondError(c, http.StatusBadRequest, 40001, "参数错误：unit 仅支持 kg 或 t")
+		return
+	}
+	result, err := h.service.CreateMaterial(c.Request.Context(), trade.MaterialInput{Name: r.Name, Category: "农产品", Unit: r.Unit})
+	if err == nil {
+		respondSuccess(c, http.StatusCreated, result)
+		return
+	}
+	if !errors.Is(err, trade.ErrConflict) {
+		respondWarehouseError(c, err)
+		return
+	}
+
+	active := trade.StatusActive
+	materials, listErr := h.service.ListMaterials(c.Request.Context(), trade.PageFilter{Keyword: r.Name, Status: &active, Page: 1, PageSize: 100})
+	if listErr != nil {
+		respondWarehouseError(c, listErr)
+		return
+	}
+	for _, material := range materials.Items {
+		if strings.EqualFold(strings.TrimSpace(material.Name), r.Name) {
+			respondSuccess(c, http.StatusOK, material)
+			return
+		}
+	}
+	respondWarehouseError(c, err)
 }
 func (h warehouseHandler) updateMaterial(c *gin.Context) {
 	id, ok := warehousePathID(c)

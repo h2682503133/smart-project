@@ -27,6 +27,7 @@ func (a roleAuthStub) Authenticate(_ context.Context, token string) (identity.Cl
 
 type warehouseServiceStub struct {
 	inbound        trade.InboundInput
+	materialInput  trade.MaterialInput
 	materialWrites int
 }
 
@@ -38,6 +39,7 @@ func (s *warehouseServiceStub) GetMaterial(context.Context, uint64) (*trade.Mate
 }
 func (s *warehouseServiceStub) CreateMaterial(_ context.Context, in trade.MaterialInput) (*trade.Material, error) {
 	s.materialWrites++
+	s.materialInput = in
 	return &trade.Material{ID: 1, Name: in.Name, Category: in.Category, Unit: in.Unit, Status: trade.StatusActive}, nil
 }
 func (s *warehouseServiceStub) UpdateMaterial(context.Context, uint64, trade.MaterialInput) (*trade.Material, error) {
@@ -161,6 +163,26 @@ func TestWarehouseRoutesAuthenticationAndRoleGates(t *testing.T) {
 	managerRouter.ServeHTTP(response, request)
 	if response.Code != http.StatusCreated || managerService.materialWrites != 1 {
 		t.Fatalf("manager material write status=%d writes=%d body=%s", response.Code, managerService.materialWrites, response.Body.String())
+	}
+
+	customerService := &warehouseServiceStub{}
+	customerAuth := roleAuthStub{role: "CUSTOMER"}
+	customerRouter := NewRouter("test", pingerStub{}, customerAuth)
+	registerWarehouseRoutes(customerRouter, customerAuth, customerService, orderServiceStub{})
+	request = httptest.NewRequest(http.MethodGet, "/api/v1/market/materials", nil)
+	request.Header.Set("Authorization", "Bearer signed-token")
+	response = httptest.NewRecorder()
+	customerRouter.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("customer market materials status=%d body=%s", response.Code, response.Body.String())
+	}
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/market/materials", strings.NewReader(`{"name":"土豆","unit":"t"}`))
+	request.Header.Set("Authorization", "Bearer signed-token")
+	request.Header.Set("Content-Type", "application/json")
+	response = httptest.NewRecorder()
+	customerRouter.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated || customerService.materialWrites != 1 || customerService.materialInput.Category != "农产品" || customerService.materialInput.Unit != "t" {
+		t.Fatalf("customer market material status=%d input=%+v body=%s", response.Code, customerService.materialInput, response.Body.String())
 	}
 }
 
