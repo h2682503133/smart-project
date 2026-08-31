@@ -1,0 +1,116 @@
+{
+  "version": 3,
+  "config": {
+    "broker": "tcp://127.0.0.1:1883",
+    "prefix": "agri",
+    "owner_id": "2",
+    "interval_ms": 5000,
+    "publish_interval_ms": 30000
+  },
+  "groups": {
+    "1": {
+      "soilMoisture": {
+        "device_sn": "SN-BEARPI-001",
+        "sensor": {
+          "unit": "%",
+          "current": 44.77247263994852,
+          "target": 45.0,
+          "factor": 0.005,
+          "noise": 0.5,
+          "min": 50.0,
+          "max": 80.0,
+          "phys_min": 0,
+          "phys_max": 100
+        }
+      },
+      "temperature": {
+        "device_sn": "SN-NEW-001",
+        "sensor": {
+          "unit": "°C",
+          "current": 25.097526883966935,
+          "target": 25.0,
+          "factor": 0.005,
+          "noise": 0.2,
+          "min": 15.0,
+          "max": 35.0,
+          "phys_min": -20,
+          "phys_max": 80
+        }
+      },
+      "light": {
+        "device_sn": "SN-BEARPI-001",
+        "sensor": {
+          "unit": "lx",
+          "current": 872.0109903323755,
+          "target": 800.0,
+          "factor": 0.005,
+          "noise": 5.0,
+          "min": 200.0,
+          "max": 1000.0,
+          "phys_min": 0,
+          "phys_max": 3000
+        }
+      },
+      "pump": {
+        "device_sn": "SN-VALVE-001",
+        "pump": {
+          "enabled": false,
+          "delta": 2.0,
+          "noise": 0.5
+        }
+      }
+    },
+    "2": {
+      "soilMoisture": {
+        "device_sn": "SN-CODE-001",
+        "sensor": {
+          "unit": "%",
+          "current": 45.274650607468224,
+          "target": 45.0,
+          "factor": 0.005,
+          "noise": 0.5,
+          "min": 50.0,
+          "max": 80.0,
+          "phys_min": 0,
+          "phys_max": 100
+        }
+      },
+      "temperature": {
+        "device_sn": "SN-TEMP-001",
+        "sensor": {
+          "unit": "°C",
+          "current": 25.79734584576336,
+          "target": 25.0,
+          "factor": 0.005,
+          "noise": 0.2,
+          "min": 5.0,
+          "max": 40.0,
+          "phys_min": -20,
+          "phys_max": 80
+        }
+      },
+      "light": {
+        "device_sn": "SN-LIGHT-001",
+        "sensor": {
+          "unit": "lx",
+          "current": 782.8077217686792,
+          "target": 800.0,
+          "factor": 0.005,
+          "noise": 5.0,
+          "min": 200.0,
+          "max": 1000.0,
+          "phys_min": 0,
+          "phys_max": 3000
+        }
+      },
+      "pump": {
+        "device_sn": "SN-VALVE-CODE-001",
+        "pump": {
+          "enabled": false,
+          "delta": 2.0,
+          "noise": 0.5
+        }
+      }
+    }
+  }
+}

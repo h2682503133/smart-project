@@ -18,6 +18,7 @@ MQTT 传感器 / 水泵模拟器 + 简易 Web UI
 import argparse
 import json
 import random
+import os
 import sys
 import threading
 import time
@@ -39,19 +40,79 @@ except ImportError:  # paho-mqtt 1.x
 # ---------------------------------------------------------------- 全局状态
 LOCK = threading.Lock()
 
-SENSORS = [
-    {"id": "soilMoisture", "name": "土壤湿度", "unit": "%",  "current": 45.0,
-     "target": 45.0, "factor": 0.08, "noise": 0.5, "min": 20, "max": 80,
-     "phys_min": 0, "phys_max": 100},
-    {"id": "temperature", "name": "温度",     "unit": "°C", "current": 25.0,
-     "target": 25.0, "factor": 0.08, "noise": 0.2, "min": 5, "max": 40,
-     "phys_min": -20, "phys_max": 80},
-    {"id": "light",       "name": "光照",     "unit": "lx", "current": 800.0,
-     "target": 800.0, "factor": 0.08, "noise": 5.0, "min": 200, "max": 1000,
-     "phys_min": 0, "phys_max": 3000},
-]
+# 现场状态文件：保留每个设备组的配置与当前读数，重启后恢复（可保留现场）
+STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "simulator_state.json")
 
-PUMP = {"enabled": False, "delta": 2.0, "noise": 0.5}
+# 组内 4 页：每页 = 一台设备，可独立设置 device_sn。
+# 页类型：soilMoisture（土壤湿度）/ temperature（温度）/ light（光照）/ pump（水泵/阀门）
+PAGES = ("soilMoisture", "temperature", "light", "pump")
+
+# 各页设备默认序列号
+PAGE_SN_DEFAULTS = {
+    "soilMoisture": "SN-BEARPI-001",
+    "temperature": "SN-TEMP-001",
+    "light": "SN-LIGHT-001",
+    "pump": "SN-VALVE-CODE-001",
+}
+
+PAGE_NAMES = {
+    "soilMoisture": "土壤湿度",
+    "temperature": "温度",
+    "light": "光照",
+    "pump": "水泵 (增加土壤湿度)",
+}
+
+# 每页设备的默认配置（单参数传感器：只上报自己指标，对齐文档 10 §5）
+PAGE_SENSOR_DEFAULTS = {
+    "soilMoisture": {"unit": "%",  "current": 45.0, "target": 45.0, "factor": 0.08, "noise": 0.5,
+                     "min": 20, "max": 80, "phys_min": 0, "phys_max": 100},
+    "temperature": {"unit": "°C", "current": 25.0, "target": 25.0, "factor": 0.08, "noise": 0.2,
+                    "min": 5, "max": 40, "phys_min": -20, "phys_max": 80},
+    "light":       {"unit": "lx", "current": 800.0, "target": 800.0, "factor": 0.08, "noise": 5.0,
+                    "min": 200, "max": 1000, "phys_min": 0, "phys_max": 3000},
+}
+
+PUMP_DEFAULTS = {"enabled": False, "delta": 2.0, "noise": 0.5}
+
+def _copy_page(page, device_sn):
+    """构造一页（一台设备）：传感器页带自己的指标配置，水泵页带水泵配置。"""
+    if page == "pump":
+        return {"device_sn": device_sn, "pump": dict(PUMP_DEFAULTS)}
+    return {"device_sn": device_sn, "sensor": dict(PAGE_SENSOR_DEFAULTS[page])}
+
+def _new_group():
+    """一组 = 4 页（湿度/温度/光照/水泵）的一份完整复制，每页可设置独立 device_sn。"""
+    return {
+        "soilMoisture": _copy_page("soilMoisture", "SN-BEARPI-001"),
+        "temperature":  _copy_page("temperature", "SN-TEMP-001"),
+        "light":        _copy_page("light", "SN-LIGHT-001"),
+        "pump":         _copy_page("pump", "SN-VALVE-CODE-001"),
+    }
+
+# 设备组字典：{group_id: {page: {device_sn, sensor|pump}}}
+# 组内每个页（每台设备）可以设置不同的 device_sn，各自向 {prefix}/{ownerId}/{deviceSn}/telemetry
+# 发布只含自身指标的 payload（单参数传感器），模拟多台独立设备。
+GROUPS = {"1": _new_group()}
+
+def _default_group_id():
+    return next(iter(GROUPS)) if GROUPS else None
+
+def _group(gid):
+    return GROUPS.get(str(gid))
+
+def _page_dev(gid, page):
+    g = _group(gid)
+    if g is None or page not in g:
+        return None
+    return g[page]
+
+def _find_by_sn(device_sn):
+    """按设备序列号找到 (group_id, page, page_dev)；供命令/阈值下发定位到对应页设备。"""
+    for gid, g in GROUPS.items():
+        for page, dev in g.items():
+            if dev.get("device_sn") == device_sn:
+                return gid, page, dev
+    return None, None, None
 
 # 后端 MQTT 命令日志: 最近 20 条
 COMMANDS = []
@@ -60,15 +121,14 @@ CFG = {
     "broker": "tcp://127.0.0.1:1883",
     "prefix": "agri",
     "owner_id": "2",
-    "device_sn": "SN-BEARPI-001",
-    "heartbeat_sns": "SN-VALVE-CODE-001",  # 心跳设备（灌溉阀门），逗号分隔多个
     "interval_ms": 1000,            # 内部采样频率：1 秒模拟一次传感器读数
     "publish_interval_ms": 30000,   # 上报频率：30 秒 publish 一次（对齐文档 10 §7）
     "connected": False,
     "running": False,
 }
 
-HISTORY = {s["id"]: [] for s in SENSORS}   # 每传感器最近 N 个值, 供 UI 画曲线
+# 每设备组每页（传感器）最近 N 个值, 供 UI 画曲线
+HISTORY = {gid: {page: [] for page in PAGES} for gid in GROUPS}
 HISTORY_LIMIT = 150
 
 STATE = {
@@ -77,6 +137,77 @@ STATE = {
     "last_error": None,
     "last_ts": None,
 }
+
+# ---------------------------------------------------------------- 保留现场
+def _state_payload():
+    """可持久化的现场数据：全局配置（不含运行态）+ 各设备组页配置与当前读数。"""
+    with LOCK:
+        return {
+            "version": 3,
+            "config": {k: CFG[k] for k in ("broker", "prefix", "owner_id", "interval_ms", "publish_interval_ms")},
+            "groups": {
+                gid: {
+                    page: dict(dev)
+                    for page, dev in g.items()
+                }
+                for gid, g in GROUPS.items()
+            },
+        }
+
+def save_state():
+    """保存现场（配置 + 当前读数）到 STATE_FILE，供重启恢复。"""
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(_state_payload(), f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[state] save failed: {e}", flush=True)
+
+def load_state():
+    """启动时加载现场：文件存在则恢复各设备组页配置与读数，保留上次现场。"""
+    global GROUPS
+    try:
+        if not os.path.exists(STATE_FILE):
+            return
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict) or not data.get("groups"):
+            return
+        with LOCK:
+            loaded = {}
+            for gid, g in data["groups"].items():
+                if not isinstance(g, dict):
+                    continue
+                group = {}
+                for page in PAGES:
+                    src = g.get(page)
+                    if not isinstance(src, dict):
+                        src = {}
+                    if page == "pump":
+                        group[page] = {
+                            "device_sn": str(src.get("device_sn") or "SN-VALVE-CODE-001"),
+                            "pump": {k: (float(v) if k != "enabled" else bool(v))
+                                     for k, v in {"enabled": False, "delta": 2.0, "noise": 0.5,
+                                                  **dict(src.get("pump") or {})}.items()},
+                        }
+                    else:
+                        merged = dict(PAGE_SENSOR_DEFAULTS[page])
+                        s = src.get("sensor") or {}
+                        for k in ("current", "target", "factor", "noise", "min", "max"):
+                            if k in s and s[k] is not None:
+                                merged[k] = float(s[k])
+                        group[page] = {
+                            "device_sn": str(src.get("device_sn") or PAGE_SN_DEFAULTS[page]),
+                            "sensor": merged,
+                        }
+                loaded[str(gid)] = group
+            if loaded:
+                GROUPS = loaded
+                for k in ("broker", "prefix", "owner_id", "interval_ms", "publish_interval_ms"):
+                    if k in data.get("config", {}):
+                        CFG[k] = data["config"][k]
+                print(f"[state] restored {len(loaded)} groups from {STATE_FILE}", flush=True)
+    except Exception as e:
+        print(f"[state] load failed: {e}", flush=True)
 
 _client = None          # paho client
 _client_broker = None   # 当前 client 对应的 broker
@@ -132,37 +263,48 @@ def _on_message(client, userdata, msg):
         payload = json.loads(msg.payload or b"{}")
         action = str(payload.get("action", "")).upper()
         with LOCK:
-            match = (owner_id == CFG["owner_id"])
-        if not match:
-            print(f"[cmd] ignore other owner: {msg.topic}", flush=True)
-            return
+            if owner_id != CFG["owner_id"]:
+                print(f"[cmd] ignore other owner: {msg.topic}", flush=True)
+                return
+            gid, page, dev = _find_by_sn(device_sn)
+            if dev is None:
+                print(f"[cmd] no device owns {device_sn}: {msg.topic}", flush=True)
+                return
         if action in ("OPEN", "IRRIGATION_ON"):
             with LOCK:
-                PUMP["enabled"] = True
+                if page == "pump":
+                    dev["pump"]["enabled"] = True
+                else:
+                    # 传感器页收到开泵命令：作用于本组水泵页
+                    GROUPS[gid]["pump"]["pump"]["enabled"] = True
             state_str = "开"
         elif action in ("CLOSE", "IRRIGATION_OFF"):
             with LOCK:
-                PUMP["enabled"] = False
+                if page == "pump":
+                    dev["pump"]["enabled"] = False
+                else:
+                    GROUPS[gid]["pump"]["pump"]["enabled"] = False
             state_str = "关"
         elif action in ("SET_THRESHOLD", "SYNC_THRESHOLD"):
-            # 云端改库后同步设备端阈值：更新本地传感器 min/max，告警判断立即用新阈值
+            # 云端改库后同步设备端阈值：更新该页设备传感器 min/max，告警判断立即用新阈值
             thresholds = payload.get("thresholds") or {}
             with LOCK:
                 applied = []
-                for s in SENSORS:
-                    t = thresholds.get(s["id"])
+                for metric, t in thresholds.items():
+                    if page == "pump" or metric != page:
+                        continue
                     if not isinstance(t, dict):
                         continue
                     if t.get("min") is not None:
-                        s["min"] = float(t["min"])
+                        dev["sensor"]["min"] = float(t["min"])
                     if t.get("max") is not None:
-                        s["max"] = float(t["max"])
-                    applied.append(f"{s['id']}({s['min']}-{s['max']})")
+                        dev["sensor"]["max"] = float(t["max"])
+                    applied.append(f"{metric}({dev['sensor']['min']}-{dev['sensor']['max']})")
             state_str = "阈值"
             if not applied:
                 print(f"[cmd] SET_THRESHOLD 无有效字段: {msg.topic}", flush=True)
                 return
-            print(f"[cmd] 阈值同步: {', '.join(applied)} ({payload.get('commandId')})", flush=True)
+            print(f"[cmd] 组{gid}/{page} 阈值同步: {', '.join(applied)} ({payload.get('commandId')})", flush=True)
         else:
             print(f"[cmd] unknown action: {action}", flush=True)
             return
@@ -176,6 +318,8 @@ def _on_message(client, userdata, msg):
             "durationSeconds": payload.get("durationSeconds"),
             "topic": msg.topic,
             "deviceSn": device_sn,
+            "groupId": gid,
+            "page": page,
         }
         with LOCK:
             COMMANDS.insert(0, entry)
@@ -187,7 +331,7 @@ def _on_message(client, userdata, msg):
             client.publish(f"{parts[0]}/{owner_id}/{device_sn}/command/ack", json.dumps(ack), qos=1)
         except Exception:
             pass
-        print(f"[cmd] pump {state_str}: {payload.get('commandId')} from {msg.topic}", flush=True)
+        print(f"[cmd] 组{gid}/{page} {state_str}: {payload.get('commandId')} from {msg.topic}", flush=True)
     except Exception as e:
         print(f"[cmd] error: {e}", flush=True)
 
@@ -214,7 +358,7 @@ def _handle_threshold_config(client, parts, raw):
     with LOCK:
         if owner_id != CFG["owner_id"]:
             return
-        is_main = (device_sn == CFG["device_sn"])
+        gid, page, dev = _find_by_sn(device_sn)
     try:
         cfg_msg = json.loads(raw)
         message_id = str(cfg_msg.get("messageId") or "").strip()
@@ -231,14 +375,15 @@ def _handle_threshold_config(client, parts, raw):
         if version <= prev:
             return
     applied = []
-    if is_main:
+    if dev is not None and page != "pump":
+        # 该设备是传感器页：只应用匹配自己指标的规则（单参数传感器）
         with LOCK:
             for rule in rules:
                 if not rule.get("enabled", True):
                     continue
-                sensor = next((s for s in SENSORS if s["id"] == rule.get("metric")), None)
-                if sensor is None:
+                if rule.get("metric") != page:
                     continue
+                sensor = dev["sensor"]
                 op = str(rule.get("operator", "")).upper()
                 value = rule.get("value")
                 if value is None:
@@ -249,7 +394,7 @@ def _handle_threshold_config(client, parts, raw):
                     sensor["max"] = float(value)
                 else:
                     continue
-                applied.append(f"{rule.get('metric')}[{sensor['min']}-{sensor['max']}]")
+                applied.append(f"{page}[{sensor['min']}-{sensor['max']}]")
     with LOCK:
         _LOCAL_CFG_VERSION[device_sn] = version
         COMMANDS.insert(0, {
@@ -258,9 +403,11 @@ def _handle_threshold_config(client, parts, raw):
             "action": f"THRESHOLD v{version}",
             "state": "阈值",
             "mode": "CONFIG",
-            "reason": ", ".join(applied) if applied else ("执行设备(无传感器)已应用" if not is_main else "无有效规则"),
+            "reason": ", ".join(applied) if applied else ("执行设备(无传感器)已应用" if page == "pump" else "无有效规则"),
             "topic": f"{parts[0]}/{owner_id}/{device_sn}/config/thresholds/v/{version}",
             "deviceSn": device_sn,
+            "groupId": gid,
+            "page": page,
         })
         del COMMANDS[20:]
     _send_threshold_ack(client, parts[0], owner_id, device_sn, message_id, version, "APPLIED")
@@ -315,41 +462,56 @@ def _ensure_connected():
             STATE["last_error"] = f"MQTT 连接失败: {e}"
         print(f"[mqtt] connect failed: {e}", flush=True)
 
-def _publish(payload: dict):
+def _publish():
+    """按组×页发布：每页设备只发自己指标的 payload（单参数传感器，对齐文档 10 §5）到自己的 topic。"""
     global _client
     with LOCK:
         broker = CFG["broker"]
         prefix = CFG["prefix"]
         owner = CFG["owner_id"]
-        sn = CFG["device_sn"]
-        # 心跳设备（如灌溉阀门）：同期发布遥测使其有活动 → 设备列表显示在线
-        heartbeat_sns = [s.strip() for s in str(CFG.get("heartbeat_sns", "")).split(",") if s.strip()]
     if _client is None or not _client.is_connected():
         with LOCK:
             STATE["last_error"] = "MQTT 未连接"
         return
-    # 主设备：真实遥测（含设备侧阈值判断的 warning）
-    targets = [(f"{prefix}/{owner}/{sn}/telemetry", payload)]
-    # 心跳设备（灌溉阀门等）：无传感器，warning 恒为 false，仅保持在线/上报读数
-    for h in heartbeat_sns:
-        h_payload = {**payload,
-                     "temperatureWarning": False,
-                     "soilMoistureWarning": False,
-                     "lightWarning": False}
-        targets.append((f"{prefix}/{owner}/{h}/telemetry", h_payload))
+    targets = []
+    with LOCK:
+        for gid, g in GROUPS.items():
+            for page, dev in g.items():
+                sn = dev.get("device_sn")
+                if not sn:
+                    continue
+                if page == "pump":
+                    # 水泵/阀门：无传感器指标，发全空 payload 保活（warning 恒 false）
+                    p = {"temperatureWarning": False, "soilMoistureWarning": False, "lightWarning": False}
+                else:
+                    s = dev["sensor"]
+                    key = page
+                    warning_key = page + "Warning"
+                    if page == "soilMoisture":
+                        p = {"soilMoisture": round(s["current"], 2),
+                             "soilMoistureWarning": bool(s["current"] < s["min"] or s["current"] > s["max"])}
+                    elif page == "temperature":
+                        p = {"temperature": round(s["current"], 2),
+                             "temperatureWarning": bool(s["current"] < s["min"] or s["current"] > s["max"])}
+                    else:  # light
+                        p = {"light": round(s["current"], 1),
+                             "lightWarning": bool(s["current"] < s["min"] or s["current"] > s["max"])}
+                targets.append((f"{prefix}/{owner}/{sn}/telemetry", p, gid, page))
     try:
         ok_count = 0
-        for topic, p in targets:
+        last_payload = None
+        for topic, p, gid, page in targets:
             info = _client.publish(topic, json.dumps(p, ensure_ascii=False), qos=1)
             if info.rc == 0:
                 ok_count += 1
+                last_payload = p
         if ok_count == 0:
             with LOCK:
                 STATE["last_error"] = f"publish rc={info.rc}"
             return
         with LOCK:
             STATE["publish_count"] += ok_count
-            STATE["last_payload"] = payload
+            STATE["last_payload"] = last_payload
             STATE["last_error"] = None
             STATE["last_ts"] = time.time()
     except Exception as e:
@@ -361,33 +523,31 @@ def _clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
 def _step():
-    """内部采样：每 tick 更新传感器读数（高频），返回当前 payload（不发布）。"""
+    """内部采样：每 tick 更新各设备组每页设备读数（高频），并记录曲线（不发布）。"""
     with LOCK:
-        sm = next(s for s in SENSORS if s["id"] == "soilMoisture")
-        # 1) 水泵先作用于土壤湿度: 设定增量 + 扰动
-        if PUMP["enabled"]:
-            sm["current"] += PUMP["delta"] + random.uniform(-PUMP["noise"], PUMP["noise"])
-        # 2) 传感器向目标值逼近: 变化量 = 差距 * 系数 + 扰动 (clamp 用物理范围)
-        for s in SENSORS:
-            diff = s["target"] - s["current"]
-            s["current"] += diff * s["factor"] + random.uniform(-s["noise"], s["noise"])
-            s["current"] = _clamp(s["current"], s["phys_min"], s["phys_max"])
-            HISTORY[s["id"]].append(round(s["current"], 3))
-            if len(HISTORY[s["id"]]) > HISTORY_LIMIT:
-                HISTORY[s["id"]] = HISTORY[s["id"]][-HISTORY_LIMIT:]
-        vals = {s["id"]: s["current"] for s in SENSORS}
-        # 3) 设备侧阈值判断：超阈值即置 warning（文档 10 §5，固件本地判断）
-        return {
-            "temperature": round(vals["temperature"], 2),
-            "soilMoisture": round(vals["soilMoisture"], 2),
-            "light": round(vals["light"], 1),
-            "temperatureWarning": bool(vals["temperature"] < SENSORS[1]["min"] or vals["temperature"] > SENSORS[1]["max"]),
-            "soilMoistureWarning": bool(vals["soilMoisture"] < SENSORS[0]["min"] or vals["soilMoisture"] > SENSORS[0]["max"]),
-            "lightWarning": bool(vals["light"] < SENSORS[2]["min"] or vals["light"] > SENSORS[2]["max"]),
-        }
+        for gid, g in GROUPS.items():
+            pump = g["pump"].get("pump", {})
+            pump_on = bool(pump.get("enabled"))
+            # 1) 水泵先作用于本组土壤湿度页: 设定增量 + 扰动
+            sm = g["soilMoisture"].get("sensor")
+            if pump_on and sm is not None:
+                sm["current"] += pump.get("delta", 0) + random.uniform(-pump.get("noise", 0), pump.get("noise", 0))
+            # 2) 各传感器页向目标值逼近: 变化量 = 差距 * 系数 + 扰动 (clamp 用物理范围)
+            for page in ("soilMoisture", "temperature", "light"):
+                s = g[page].get("sensor")
+                if s is None:
+                    continue
+                diff = s["target"] - s["current"]
+                s["current"] += diff * s["factor"] + random.uniform(-s["noise"], s["noise"])
+                s["current"] = _clamp(s["current"], s["phys_min"], s["phys_max"])
+                HISTORY.setdefault(gid, {}).setdefault(page, []).append(round(s["current"], 3))
+                h = HISTORY[gid][page]
+                if len(h) > HISTORY_LIMIT:
+                    HISTORY[gid][page] = h[-HISTORY_LIMIT:]
 
 def _tick_loop():
     last_publish = 0.0
+    last_save = 0.0
     while not _stop_event.is_set():
         with LOCK:
             interval = CFG["interval_ms"] / 1000.0
@@ -395,51 +555,104 @@ def _tick_loop():
             running = CFG["running"]
         if running:
             _ensure_connected()
-            payload = _step()  # 高频采样（1s）
-            if time.time() - last_publish >= publish_interval:  # 低频上报（30s）
-                _publish(payload)
-                last_publish = time.time()
+            _step()  # 高频采样（1s）
+            now = time.time()
+            if now - last_publish >= publish_interval:  # 低频上报（30s）
+                _publish()
+                last_publish = now
+            if now - last_save >= 5:  # 定期保留现场（当前读数）
+                save_state()
+                last_save = now
         _stop_event.wait(interval)
 
 def _start():
     with LOCK:
         CFG["running"] = True
         STATE["last_error"] = None
+    save_state()
     print("[sim] started", flush=True)
 
 def _stop():
     with LOCK:
         CFG["running"] = False
+    save_state()
     print("[sim] stopped", flush=True)
 
 # ---------------------------------------------------------------- HTTP
 def _state_snapshot():
     with LOCK:
         return {
-            "config": {k: CFG[k] for k in ("broker", "prefix", "owner_id", "device_sn", "heartbeat_sns", "interval_ms", "publish_interval_ms", "connected", "running")},
-            "sensors": list(SENSORS),
-            "pump": dict(PUMP),
+            "config": {k: CFG[k] for k in ("broker", "prefix", "owner_id", "interval_ms", "publish_interval_ms", "connected", "running")},
+            "groups": {
+                gid: {
+                    page: dict(dev)
+                    for page, dev in g.items()
+                }
+                for gid, g in GROUPS.items()
+            },
             "commands": list(COMMANDS),
-            "history": {k: list(v) for k, v in HISTORY.items()},
+            "history": {gid: {page: list(v) for page, v in pages.items()} for gid, pages in HISTORY.items()},
             "state": {k: STATE[k] for k in ("publish_count", "last_payload", "last_error", "last_ts")},
         }
 
 def _apply_sensor(patch):
+    """更新某设备组某传感器页: {group_id, id, target/factor/noise/min/max}（id 为页类型）。"""
+    gid = str(patch.get("group_id") or _default_group_id())
+    page = str(patch.get("id") or "")
     with LOCK:
-        for s in SENSORS:
-            if s["id"] == patch.get("id"):
-                for k in ("target", "factor", "noise", "min", "max"):
-                    if k in patch and patch[k] is not None:
-                        s[k] = float(patch[k])
-                return True
-    return False
+        dev = _page_dev(gid, page)
+        if dev is None or "sensor" not in dev:
+            return False
+        s = dev["sensor"]
+        for k in ("target", "factor", "noise", "min", "max"):
+            if k in patch and patch[k] is not None:
+                s[k] = float(patch[k])
+        return True
 
 def _apply_pump(patch):
+    """更新某设备组水泵页: {group_id, enabled/delta/noise}。"""
+    gid = str(patch.get("group_id") or _default_group_id())
     with LOCK:
+        dev = _page_dev(gid, "pump")
+        if dev is None or "pump" not in dev:
+            return False
         for k in ("enabled", "delta", "noise"):
             if k in patch and patch[k] is not None:
-                PUMP[k] = bool(patch[k]) if k == "enabled" else float(patch[k])
-    return True
+                dev["pump"][k] = bool(patch[k]) if k == "enabled" else float(patch[k])
+        return True
+
+def _apply_page_sn(patch):
+    """设置某设备组某页的 device_sn: {group_id, page, device_sn}。"""
+    gid = str(patch.get("group_id") or _default_group_id())
+    page = str(patch.get("page") or "")
+    sn = str(patch.get("device_sn") or "").strip()
+    if page not in PAGES or not sn:
+        return False
+    with LOCK:
+        dev = _page_dev(gid, page)
+        if dev is None:
+            return False
+        dev["device_sn"] = sn
+        return True
+
+def _add_group():
+    with LOCK:
+        # 找一个空闲组号
+        n = 1
+        while str(n) in GROUPS:
+            n += 1
+        GROUPS[str(n)] = _new_group()
+        HISTORY[str(n)] = {page: [] for page in PAGES}
+        return str(n)
+
+def _remove_group(gid):
+    with LOCK:
+        gid = str(gid)
+        if gid not in GROUPS:
+            return False
+        del GROUPS[gid]
+        HISTORY.pop(gid, None)
+        return True
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # 静默访问日志
@@ -485,20 +698,42 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, {"ok": True})
         elif path == "/api/config":
             with LOCK:
-                for k in ("broker", "prefix", "owner_id", "device_sn", "heartbeat_sns"):
+                for k in ("broker", "prefix", "owner_id"):
                     if k in body and body[k]:
                         CFG[k] = str(body[k]).strip()
                 if "interval_ms" in body and body["interval_ms"]:
                     CFG["interval_ms"] = max(50, int(body["interval_ms"]))
                 if "publish_interval_ms" in body and body["publish_interval_ms"]:
                     CFG["publish_interval_ms"] = max(1000, int(body["publish_interval_ms"]))
+            save_state()
             self._send(200, {"ok": True})
         elif path == "/api/sensor":
             ok = _apply_sensor(body)
+            if ok:
+                save_state()
             self._send(200, {"ok": ok})
         elif path == "/api/pump":
             ok = _apply_pump(body)
+            if ok:
+                save_state()
             self._send(200, {"ok": ok})
+        elif path == "/api/device":
+            ok = _apply_page_sn(body)
+            if ok:
+                save_state()
+            self._send(200, {"ok": ok})
+        elif path == "/api/group":
+            action = str(body.get("action") or "add")
+            if action == "add":
+                gid = _add_group()
+                save_state()
+                self._send(200, {"ok": True, "group_id": gid})
+            elif action == "remove":
+                ok = _remove_group(body.get("group_id"))
+                save_state()
+                self._send(200, {"ok": ok})
+            else:
+                self._send(400, {"ok": False, "error": "unknown action"})
         else:
             self._send(404, {"error": "not found"})
 
@@ -508,7 +743,7 @@ _HTML = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MQTT 传感器 / 水泵模拟器</title>
+<title>MQTT 模拟器（多组设备）</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: #0f172a; color: #e2e8f0; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; padding: 16px; }
@@ -526,7 +761,13 @@ _HTML = """<!DOCTYPE html>
   .btn { border: none; border-radius: 8px; padding: 8px 18px; font-size: 14px; cursor: pointer; font-weight: 600; }
   .btn.start { background: #22c55e; color: #052e16; }
   .btn.stop { background: #ef4444; color: #450a0a; }
+  .btn.ghost { background: #334155; color: #e2e8f0; }
   .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; align-items: center; }
+  .tab { background: #1e293b; border: 1px solid #334155; color: #94a3b8; border-radius: 8px;
+         padding: 6px 14px; cursor: pointer; font-size: 13px; }
+  .tab.active { background: #38bdf8; color: #052e16; border-color: #38bdf8; font-weight: 700; }
+  .tab .del { margin-left: 8px; color: #f87171; font-weight: 700; }
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }
   .card { background: #1e293b; border: 1px solid #334155; border-radius: 12px; padding: 14px; }
   .card .head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
@@ -534,6 +775,8 @@ _HTML = """<!DOCTYPE html>
   .card .big { font-size: 34px; font-weight: 700; font-variant-numeric: tabular-nums; }
   .card .unit { font-size: 14px; color: #64748b; margin-left: 4px; }
   .warn { color: #f97316; font-size: 12px; margin-left: 8px; }
+  .sn { display: block; margin: 4px 0 8px; background: #0f172a; color: #7dd3fc; border: 1px solid #475569;
+        border-radius: 6px; padding: 4px 8px; font-size: 12px; width: 100%; font-family: monospace; }
   .row { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 13px; color: #cbd5e1; }
   .row label { width: 56px; color: #94a3b8; flex-shrink: 0; }
   .row input[type=range] { flex: 1; accent-color: #38bdf8; }
@@ -551,69 +794,43 @@ _HTML = """<!DOCTYPE html>
 </style>
 </head>
 <body>
-<h1>MQTT 传感器 / 水泵模拟器 <small>向 {prefix}/{ownerId}/{deviceSn}/telemetry 发布</small></h1>
+<h1>MQTT 模拟器 <small>多组设备：4 页为一组，每页可独立设置 deviceSn</small></h1>
 
 <div class="bar">
   <label>broker <input id="cfg-broker" value="tcp://127.0.0.1:1883"></label>
   <label>prefix <input id="cfg-prefix" value="agri" style="width:70px"></label>
   <label>ownerId <input id="cfg-owner" value="2" style="width:60px"></label>
-  <label>deviceSn <input id="cfg-sn" value="SN-BEARPI-001" style="width:140px"></label>
-  <label>心跳SN(逗号) <input id="cfg-heartbeat" value="SN-VALVE-CODE-001" style="width:150px"></label>
   <label>采样ms <input id="cfg-interval" type="number" min="50" value="1000"></label>
   <label>上报ms <input id="cfg-publish" type="number" min="1000" value="30000"></label>
   <span id="conn"><span class="dot off"></span>未连接</span>
   <button id="btn-start" class="btn start">▶ 启动</button>
   <button id="btn-stop" class="btn stop" disabled>⏹ 停止</button>
+  <button id="btn-add-group" class="btn ghost">+ 新增组</button>
 </div>
 
-<div class="grid">
-  <div class="card" id="card-soilMoisture">
-    <div class="head"><span class="name">土壤湿度</span><span id="big-soilMoisture" class="big">-</span><span class="unit">%</span><span class="warn" id="warn-soilMoisture"></span></div>
-    <div class="row"><label>目标</label><input type="range" data-k="target" min="0" max="100" step="0.5"><input type="number" data-num="target" step="0.5"></div>
-    <div class="row"><label>变化系数</label><input type="range" data-k="factor" min="0.005" max="0.5" step="0.005"><input type="number" data-num="factor" step="0.005"></div>
-    <div class="row"><label>扰动</label><input type="range" data-k="noise" min="0" max="10" step="0.1"><input type="number" data-num="noise" step="0.1"></div>
-    <div class="row"><label>告警范围</label><input type="number" data-k="min" style="width:60px"><span>~</span><input type="number" data-k="max" style="width:60px"></div>
-    <canvas id="cv-soilMoisture"></canvas>
-  </div>
-
-  <div class="card" id="card-temperature">
-    <div class="head"><span class="name">温度</span><span id="big-temperature" class="big">-</span><span class="unit">°C</span><span class="warn" id="warn-temperature"></span></div>
-    <div class="row"><label>目标</label><input type="range" data-k="target" min="-10" max="60" step="0.5"><input type="number" data-num="target" step="0.5"></div>
-    <div class="row"><label>变化系数</label><input type="range" data-k="factor" min="0.005" max="0.5" step="0.005"><input type="number" data-num="factor" step="0.005"></div>
-    <div class="row"><label>扰动</label><input type="range" data-k="noise" min="0" max="5" step="0.1"><input type="number" data-num="noise" step="0.1"></div>
-    <div class="row"><label>告警范围</label><input type="number" data-k="min" style="width:60px"><span>~</span><input type="number" data-k="max" style="width:60px"></div>
-    <canvas id="cv-temperature"></canvas>
-  </div>
-
-  <div class="card" id="card-light">
-    <div class="head"><span class="name">光照</span><span id="big-light" class="big">-</span><span class="unit">lx</span><span class="warn" id="warn-light"></span></div>
-    <div class="row"><label>目标</label><input type="range" data-k="target" min="0" max="2000" step="10"><input type="number" data-num="target" step="10"></div>
-    <div class="row"><label>变化系数</label><input type="range" data-k="factor" min="0.005" max="0.5" step="0.005"><input type="number" data-num="factor" step="0.005"></div>
-    <div class="row"><label>扰动</label><input type="range" data-k="noise" min="0" max="100" step="1"><input type="number" data-num="noise" step="1"></div>
-    <div class="row"><label>告警范围</label><input type="number" data-k="min" style="width:60px"><span>~</span><input type="number" data-k="max" style="width:60px"></div>
-    <canvas id="cv-light"></canvas>
-  </div>
-
-  <div class="card" id="card-pump">
-    <div class="head"><span class="name">水泵 (增加土壤湿度)</span><span id="pump-effect" class="warn"></span></div>
-    <button id="pump-btn" class="pump-btn off">水泵 关</button>
-    <div class="row"><label>每次增量</label><input type="range" data-k="delta" min="0" max="10" step="0.1"><input type="number" data-num="delta" step="0.1"></div>
-    <div class="row"><label>扰动</label><input type="range" data-k="noise" min="0" max="5" step="0.1"><input type="number" data-num="noise" step="0.1"></div>
-    <div style="margin-top:10px;font-size:12px;color:#64748b">开启后每个 tick 给土壤湿度增加 <b>增量+扰动</b>；湿度传感器仍会向自己的目标值逼近，两者可形成对抗。</div>
-    <div style="margin-top:10px;font-size:12px;color:#94a3b8">后端命令 (<span id="cmd-count">0</span>)</div>
-    <div id="cmd-log" style="margin-top:4px;max-height:120px;overflow-y:auto;font-size:11px;color:#7dd3fc;background:#0f172a;border:1px solid #334155;border-radius:6px;padding:6px"></div>
-  </div>
-</div>
+<div class="tabs" id="tabs"></div>
+<div class="grid" id="grid"></div>
 
 <div class="foot">
   已发布 <b id="pub-count">0</b> 条 &nbsp;|&nbsp; <span id="pub-err"></span>
   <pre id="last-payload">(等待发布…)</pre>
+  <div style="margin-top:8px;color:#94a3b8">后端命令 (<span id="cmd-count">0</span>)</div>
+  <div id="cmd-log" style="margin-top:4px;max-height:140px;overflow-y:auto;font-size:11px;color:#7dd3fc;background:#0f172a;border:1px solid #334155;border-radius:6px;padding:6px"></div>
 </div>
 
 <script>
 const $ = id => document.getElementById(id);
 let state = null;
+let curGroup = null;
 let postTimer = null;
+
+const PAGE_NAMES = { soilMoisture: '土壤湿度', temperature: '温度', light: '光照', pump: '水泵 (增加土壤湿度)' };
+const PAGE_UNITS = { soilMoisture: '%', temperature: '°C', light: 'lx' };
+const PAGE_LIMITS = {
+  soilMoisture: { target: [0, 100, 0.5], factor: [0.005, 0.5, 0.005], noise: [0, 10, 0.1] },
+  temperature: { target: [-10, 60, 0.5], factor: [0.005, 0.5, 0.005], noise: [0, 5, 0.1] },
+  light: { target: [0, 2000, 10], factor: [0.005, 0.5, 0.005], noise: [0, 100, 1] }
+};
 
 function schedulePost(url, body) {
   clearTimeout(postTimer);
@@ -622,73 +839,222 @@ function schedulePost(url, body) {
   }, 150);
 }
 
-function bindSensor(id) {
-  const card = $(`card-${id}`);
-  card.querySelectorAll('input[data-k]').forEach(el => {
-    el.addEventListener('input', () => {
-      const k = el.dataset.k;
-      const num = card.querySelector(`input[data-num="${k}"]`);
-      if (num) num.value = el.value;
-      schedulePost('/api/sensor', { id, [k]: parseFloat(el.value) });
+// 本地输入覆盖：输入即记录，轮询合并时优先本地值，服务器同步后再清除
+let localOverrides = {};
+
+function setOverride(gid, page, field, value) {
+  localOverrides[`${gid}:${page}:${field}`] = value;
+}
+
+function mergeOverrides(fresh) {
+  for (const key in localOverrides) {
+    if (key.startsWith('config:')) {
+      const field = key.slice('config:'.length);
+      if (!(field in fresh.config)) { delete localOverrides[key]; continue; }
+      if (String(fresh.config[field]) === String(localOverrides[key])) {
+        delete localOverrides[key];
+      } else {
+        fresh.config[field] = localOverrides[key];
+      }
+      continue;
+    }
+    const [gid, page, field] = key.split(':');
+    const g = fresh.groups && fresh.groups[gid];
+    const dev = g && g[page];
+    if (!dev) continue;
+    let serverVal = dev.device_sn;
+    if (dev.sensor && field in dev.sensor) serverVal = dev.sensor[field];
+    else if (dev.pump && field in dev.pump) serverVal = dev.pump[field];
+    if (String(serverVal) === String(localOverrides[key])) {
+      delete localOverrides[key];  // 服务器已同步，恢复正常回显
+    } else if (field === 'device_sn') {
+      dev.device_sn = localOverrides[key];
+    } else if (dev.sensor && field in dev.sensor) {
+      dev.sensor[field] = localOverrides[key];
+    } else if (dev.pump && field in dev.pump) {
+      dev.pump[field] = localOverrides[key];
+    }
+  }
+}
+
+// 顶栏配置乐观更新（override key 用 "config:字段"）
+function applyLocalConfig(field, value) {
+  if (!state || !state.config) return;
+  state.config[field] = value;
+  localOverrides['config:' + field] = value;
+}
+
+// 乐观更新本地 state：输入即写本地，轮询回显读本地最新值，避免被服务器旧值退回
+function applyLocal(gid, page, patch) {
+  const g = state && state.groups && state.groups[gid];
+  if (!g || !g[page]) return;
+  const dev = g[page];
+  if (patch.device_sn !== undefined) {
+    dev.device_sn = patch.device_sn;
+    setOverride(gid, page, 'device_sn', patch.device_sn);
+  }
+  if (patch.sensor) {
+    Object.assign(dev.sensor, patch.sensor);
+    for (const k in patch.sensor) setOverride(gid, page, k, patch.sensor[k]);
+  }
+  if (patch.pump) {
+    Object.assign(dev.pump, patch.pump);
+    for (const k in patch.pump) setOverride(gid, page, k, patch.pump[k]);
+  }
+}
+
+function makeCard(gid, page) {
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.id = `card-${gid}-${page}`;
+  if (page === 'pump') {
+    card.innerHTML = `
+      <div class="head"><span class="name">${PAGE_NAMES[page]}</span><span id="pump-effect-${gid}" class="warn"></span></div>
+      <input class="sn" data-sn placeholder="deviceSn">
+      <button id="pump-btn-${gid}" class="pump-btn off">水泵 关</button>
+      <div class="row"><label>每次增量</label><input type="range" data-k="delta" min="0" max="10" step="0.1"><input type="number" data-num="delta" step="0.1"></div>
+      <div class="row"><label>扰动</label><input type="range" data-k="noise" min="0" max="5" step="0.1"><input type="number" data-num="noise" step="0.1"></div>
+      <div style="margin-top:8px;font-size:12px;color:#64748b">开启后每个 tick 给本组土壤湿度增加 <b>增量+扰动</b>；湿度传感器仍会向自己的目标值逼近，两者可形成对抗。</div>`;
+    const sn = card.querySelector('[data-sn]');
+    sn.addEventListener('input', () => {
+      applyLocal(gid, 'pump', { device_sn: sn.value });
+      schedulePost('/api/device', { group_id: gid, page: 'pump', device_sn: sn.value.trim() });
     });
-  });
-  card.querySelectorAll('input[data-num]').forEach(el => {
-    el.addEventListener('change', () => {
-      const k = el.dataset.k;
-      const range = card.querySelector(`input[data-k="${k}"]`);
-      if (range) range.value = el.value;
-      schedulePost('/api/sensor', { id, [k]: parseFloat(el.value) });
+    card.querySelectorAll('input[data-k]').forEach(el => {
+      el.addEventListener('input', () => {
+        const k = el.dataset.k, num = card.querySelector(`input[data-num="${k}"]`);
+        if (num) num.value = el.value;
+        applyLocal(gid, 'pump', { pump: { [k]: parseFloat(el.value) } });
+        schedulePost('/api/pump', { group_id: gid, [k]: parseFloat(el.value) });
+      });
     });
+    card.querySelectorAll('input[data-num]').forEach(el => {
+      el.addEventListener('input', () => {
+        const k = el.dataset.k, range = card.querySelector(`input[data-k="${k}"]`);
+        if (range) range.value = el.value;
+        applyLocal(gid, 'pump', { pump: { [k]: parseFloat(el.value) } });
+        schedulePost('/api/pump', { group_id: gid, [k]: parseFloat(el.value) });
+      });
+    });
+    const pumpBtn = card.querySelector('.pump-btn');
+    pumpBtn.addEventListener('click', () => {
+      const on = state && state.groups[gid] && state.groups[gid].pump.pump.enabled ? false : true;
+      applyLocal(gid, 'pump', { pump: { enabled: on } });
+      schedulePost('/api/pump', { group_id: gid, enabled: on });
+      updatePumpBtn(gid, on);
+    });
+  } else {
+    const L = PAGE_LIMITS[page];
+    const units = PAGE_UNITS[page];
+    card.innerHTML = `
+      <div class="head"><span class="name">${PAGE_NAMES[page]}</span><span id="big-${gid}-${page}" class="big">-</span><span class="unit">${units}</span><span class="warn" id="warn-${gid}-${page}"></span></div>
+      <input class="sn" data-sn placeholder="deviceSn">
+      <div class="row"><label>目标</label><input type="range" data-k="target" min="${L.target[0]}" max="${L.target[1]}" step="${L.target[2]}"><input type="number" data-num="target" step="${L.target[2]}"></div>
+      <div class="row"><label>变化系数</label><input type="range" data-k="factor" min="${L.factor[0]}" max="${L.factor[1]}" step="${L.factor[2]}"><input type="number" data-num="factor" step="${L.factor[2]}"></div>
+      <div class="row"><label>扰动</label><input type="range" data-k="noise" min="${L.noise[0]}" max="${L.noise[1]}" step="${L.noise[2]}"><input type="number" data-num="noise" step="${L.noise[2]}"></div>
+      <div class="row"><label>告警范围</label><input type="number" data-k="min" style="width:60px"><span>~</span><input type="number" data-k="max" style="width:60px"></div>
+      <canvas id="cv-${gid}-${page}"></canvas>`;
+    const sn = card.querySelector('[data-sn]');
+    sn.addEventListener('input', () => {
+      applyLocal(gid, page, { device_sn: sn.value });
+      schedulePost('/api/device', { group_id: gid, page, device_sn: sn.value.trim() });
+    });
+    const localSensor = (k, v) => applyLocal(gid, page, { sensor: { [k]: v } });
+    card.querySelectorAll('input[data-k]').forEach(el => {
+      el.addEventListener('input', () => {
+        const k = el.dataset.k, num = card.querySelector(`input[data-num="${k}"]`);
+        if (num) num.value = el.value;
+        const v = parseFloat(el.value);
+        localSensor(k, v);
+        schedulePost('/api/sensor', { group_id: gid, id: page, [k]: v });
+      });
+    });
+    card.querySelectorAll('input[data-num]').forEach(el => {
+      el.addEventListener('input', () => {
+        const k = el.dataset.k, range = card.querySelector(`input[data-k="${k}"]`);
+        if (range) range.value = el.value;
+        const v = parseFloat(el.value);
+        localSensor(k, v);
+        schedulePost('/api/sensor', { group_id: gid, id: page, [k]: v });
+      });
+    });
+  }
+  return card;
+}
+
+function renderTabs() {
+  const tabs = $('tabs');
+  tabs.innerHTML = '';
+  Object.keys(state.groups).forEach(gid => {
+    const t = document.createElement('button');
+    t.className = 'tab' + (gid === curGroup ? ' active' : '');
+    t.innerHTML = `组 ${gid} <span class="del">×</span>`;
+    t.onclick = (e) => {
+      if (e.target.classList.contains('del')) {
+        if (!confirm(`删除组 ${gid}？`)) return;
+        Object.keys(localOverrides).forEach(k => { if (k.startsWith(gid + ':')) delete localOverrides[k]; });
+        fetch('/api/group', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'remove', group_id: gid }) });
+        return;
+      }
+      curGroup = gid;
+      renderGroup();
+    };
+    tabs.appendChild(t);
   });
 }
-['soilMoisture', 'temperature', 'light'].forEach(bindSensor);
 
-(function bindPump() {
-  const card = $('card-pump');
-  card.querySelectorAll('input[data-k]').forEach(el => {
-    el.addEventListener('input', () => {
-      const k = el.dataset.k;
-      const num = card.querySelector(`input[data-num="${k}"]`);
-      if (num) num.value = el.value;
-      schedulePost('/api/pump', { [k]: parseFloat(el.value) });
-    });
-  });
-  card.querySelectorAll('input[data-num]').forEach(el => {
-    el.addEventListener('change', () => {
-      const k = el.dataset.k;
-      const range = card.querySelector(`input[data-k="${k}"]`);
-      if (range) range.value = el.value;
-      schedulePost('/api/pump', { [k]: parseFloat(el.value) });
-    });
-  });
-  $('pump-btn').addEventListener('click', () => {
-    const on = !(state && state.pump.enabled);
-    schedulePost('/api/pump', { enabled: on });
-    updatePumpBtn(on);
-  });
-})();
-
-function bindConfig() {
-  ['cfg-broker', 'cfg-prefix', 'cfg-owner', 'cfg-sn', 'cfg-heartbeat'].forEach(id => {
-    $(id).addEventListener('change', () => {
-      const key = { 'cfg-broker': 'broker', 'cfg-prefix': 'prefix', 'cfg-owner': 'owner_id', 'cfg-sn': 'device_sn', 'cfg-heartbeat': 'heartbeat_sns' }[id];
-      schedulePost('/api/config', { [key]: $(id).value.trim() });
-    });
-  });
-  $('cfg-interval').addEventListener('change', () => {
-    schedulePost('/api/config', { interval_ms: parseInt($('cfg-interval').value) });
-  });
-  $('cfg-publish').addEventListener('change', () => {
-    schedulePost('/api/config', { publish_interval_ms: parseInt($('cfg-publish').value) });
+function renderGroup() {
+  const grid = $('grid');
+  grid.innerHTML = '';
+  const g = state.groups[curGroup];
+  if (!g) return;
+  ['soilMoisture', 'temperature', 'light', 'pump'].forEach(page => {
+    const card = makeCard(curGroup, page);
+    grid.appendChild(card);
+    applyCard(curGroup, page);
   });
 }
-bindConfig();
 
-$('btn-start').addEventListener('click', () => fetch('/api/start', { method: 'POST' }));
-$('btn-stop').addEventListener('click', () => fetch('/api/stop', { method: 'POST' }));
+function applyCard(gid, page) {
+  const g = state.groups[gid];
+  if (!g) return;
+  const dev = g[page];
+  const card = $(`card-${gid}-${page}`);
+  if (!card) return;
+  const sn = card.querySelector('[data-sn]');
+  if (sn && document.activeElement !== sn) sn.value = dev.device_sn || '';
+  if (page === 'pump') {
+    const p = dev.pump || {};
+    updatePumpBtn(gid, p.enabled);
+    [['delta', 'delta'], ['noise', 'noise']].forEach(([k, sk]) => {
+      const range = card.querySelector(`input[data-k="${k}"]`);
+      const num = card.querySelector(`input[data-num="${k}"]`);
+      if (range && document.activeElement !== range && document.activeElement !== num) { range.value = p[sk]; if (num) num.value = p[sk]; }
+    });
+    $(`pump-effect-${gid}`).textContent = p.enabled ? '正在增加湿度' : '';
+    return;
+  }
+  const s = dev.sensor || {};
+  const big = $(`big-${gid}-${page}`);
+  if (big) big.textContent = Number(s.current || 0).toFixed(page === 'light' ? 0 : 1);
+  const warn = $(`warn-${gid}-${page}`);
+  const over = s.current < s.min || s.current > s.max;
+  if (warn) { warn.textContent = over ? '⚠ 告警' : ''; warn.style.visibility = over ? 'visible' : 'hidden'; }
+  [['target', 'target'], ['factor', 'factor'], ['noise', 'noise'], ['min', 'min'], ['max', 'max']].forEach(([k, sk]) => {
+    const range = card.querySelector(`input[data-k="${k}"]`);
+    const num = card.querySelector(`input[data-num="${k}"]`);
+    if (range && document.activeElement !== range && document.activeElement !== num) { range.value = s[sk]; if (num) num.value = s[sk]; }
+  });
+  const cv = $(`cv-${gid}-${page}`);
+  if (cv) {
+    cv.width = cv.clientWidth || 280; cv.height = 70;
+    draw(cv, (state.history[gid] || {})[page] || [], s.min, s.max);
+  }
+}
 
-function updatePumpBtn(on) {
-  const b = $('pump-btn');
+function updatePumpBtn(gid, on) {
+  const b = $(`pump-btn-${gid}`);
+  if (!b) return;
   b.className = 'pump-btn ' + (on ? 'on' : 'off');
   b.textContent = on ? '水泵 开 (增加湿度中)' : '水泵 关';
 }
@@ -710,55 +1076,50 @@ function draw(cv, values, lo, hi) {
   ctx.stroke();
 }
 
+function bindConfig() {
+  const bind = (id, key, transform) => {
+    $(id).addEventListener('input', () => {
+      const v = transform ? transform($(id).value) : $(id).value;
+      applyLocalConfig(key, v);
+      schedulePost('/api/config', { [key]: v });
+    });
+  };
+  bind('cfg-broker', 'broker', v => v.trim());
+  bind('cfg-prefix', 'prefix', v => v.trim());
+  bind('cfg-owner', 'owner_id', v => v.trim());
+  bind('cfg-interval', 'interval_ms', v => parseInt(v) || 1000);
+  bind('cfg-publish', 'publish_interval_ms', v => parseInt(v) || 30000);
+  $('btn-start').addEventListener('click', () => fetch('/api/start', { method: 'POST' }));
+  $('btn-stop').addEventListener('click', () => fetch('/api/stop', { method: 'POST' }));
+  $('btn-add-group').addEventListener('click', async () => {
+    const r = await fetch('/api/group', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'add' }) });
+    const d = await r.json();
+    if (d.ok) curGroup = d.group_id;
+  });
+}
+bindConfig();
+
 function render(s) {
   const cfg = s.config;
-  // 配置回显(仅当用户未聚焦时)
-  if (document.activeElement !== $('cfg-broker')) $('cfg-broker').value = cfg.broker;
-  $('cfg-prefix').value = cfg.prefix;
-  $('cfg-owner').value = cfg.owner_id;
-  $('cfg-sn').value = cfg.device_sn;
-  $('cfg-heartbeat').value = cfg.heartbeat_sns;
-  $('cfg-interval').value = cfg.interval_ms;
-  $('cfg-publish').value = cfg.publish_interval_ms;
+  // 配置回显：全部输入框仅在未聚焦时回显（防止轮询打断输入）
+  const syncVal = (id, v) => { const el = $(id); if (el && document.activeElement !== el) el.value = v; };
+  syncVal('cfg-broker', cfg.broker);
+  syncVal('cfg-prefix', cfg.prefix);
+  syncVal('cfg-owner', cfg.owner_id);
+  syncVal('cfg-interval', cfg.interval_ms);
+  syncVal('cfg-publish', cfg.publish_interval_ms);
   const conn = $('conn');
-  conn.innerHTML = cfg.connected
-    ? '<span class="dot on"></span>MQTT 已连接'
-    : '<span class="dot off"></span>MQTT 未连接';
+  conn.innerHTML = cfg.connected ? '<span class="dot on"></span>MQTT 已连接' : '<span class="dot off"></span>MQTT 未连接';
   $('btn-start').disabled = cfg.running;
   $('btn-stop').disabled = !cfg.running;
 
-  s.sensors.forEach(sen => {
-    const card = $(`card-${sen.id}`);
-    const big = $(`big-${sen.id}`);
-    big.textContent = Number(sen.current).toFixed(sen.id === 'light' ? 0 : 1);
-    const warn = $(`warn-${sen.id}`);
-    const over = sen.current < sen.min || sen.current > sen.max;
-    warn.textContent = over ? '⚠ 告警' : '';
-    warn.style.visibility = over ? 'visible' : 'hidden';
-    // 回显控件(仅当未聚焦)
-    [['target', 'target'], ['factor', 'factor'], ['noise', 'noise'], ['min', 'min'], ['max', 'max']].forEach(([k, sk]) => {
-      const range = card.querySelector(`input[data-k="${k}"]`);
-      const num = card.querySelector(`input[data-num="${k}"]`);
-      if (document.activeElement !== range && document.activeElement !== num) {
-        range.value = sen[sk];
-        if (num) num.value = sen[sk];
-      }
-    });
-    draw($(`cv-${sen.id}`), s.history[sen.id], sen.min, sen.max);
-  });
+  const gids = Object.keys(s.groups);
+  if (!gids.length) return;
+  if (!curGroup || !s.groups[curGroup]) curGroup = gids[0];
+  renderTabs();
+  if (!document.querySelector(`#card-${curGroup}-soilMoisture`)) renderGroup();
+  ['soilMoisture', 'temperature', 'light', 'pump'].forEach(page => applyCard(curGroup, page));
 
-  updatePumpBtn(s.pump.enabled);
-  [['delta', 'delta'], ['noise', 'noise']].forEach(([k, sk]) => {
-    const range = $(`card-pump`).querySelector(`input[data-k="${k}"]`);
-    const num = $(`card-pump`).querySelector(`input[data-num="${k}"]`);
-    if (document.activeElement !== range && document.activeElement !== num) {
-      range.value = s.pump[sk];
-      num.value = s.pump[sk];
-    }
-  });
-  $('pump-effect').textContent = s.pump.enabled ? '正在增加湿度' : '';
-
-  // 后端命令日志
   $('cmd-count').textContent = (s.commands || []).length;
   const log = $('cmd-log');
   if (!(s.commands || []).length) {
@@ -767,28 +1128,24 @@ function render(s) {
     log.innerHTML = s.commands.map(c => {
       const t = new Date(c.ts * 1000).toLocaleTimeString('zh-CN', { hour12: false });
       const d = c.durationSeconds ? ` · ${c.durationSeconds}s` : '';
-      return `<div style="margin:2px 0">[${t}] <b style="color:${c.state === '开' ? '#22c55e' : '#f87171'}">泵${c.state}</b> ${c.action}${d} · ${c.commandId}<br><span style="color:#64748b">${c.topic}${c.reason ? ' · ' + c.reason : ''}</span></div>`;
+      const who = `组${c.groupId || '?'}/${c.page || '?'}`;
+      return `<div style="margin:2px 0">[${t}] <b style="color:${c.state === '开' ? '#22c55e' : '#f87171'}">${who} ${c.state}</b> ${c.action}${d} · ${c.commandId}<br><span style="color:#64748b">${c.topic}${c.reason ? ' · ' + c.reason : ''}</span></div>`;
     }).join('');
   }
 
   $('pub-count').textContent = s.state.publish_count;
   const err = $('pub-err');
-  if (s.state.last_error) {
-    err.className = 'err';
-    err.textContent = '⚠ ' + s.state.last_error;
-  } else {
-    err.className = '';
-    err.textContent = '';
-  }
-  $('last-payload').textContent = s.state.last_payload
-    ? JSON.stringify(s.state.last_payload, null, 2)
-    : '(等待发布…)';
+  if (s.state.last_error) { err.className = 'err'; err.textContent = '⚠ ' + s.state.last_error; }
+  else { err.className = ''; err.textContent = ''; }
+  $('last-payload').textContent = s.state.last_payload ? JSON.stringify(s.state.last_payload, null, 2) : '(等待发布…)';
 }
 
 async function refresh() {
   try {
     const r = await fetch('/api/state');
-    state = await r.json();
+    const fresh = await r.json();
+    mergeOverrides(fresh);  // 合并本地输入覆盖，防止服务器旧值退回
+    state = fresh;
     render(state);
   } catch (e) { /* 服务重启中 */ }
 }
@@ -806,18 +1163,22 @@ def main():
     ap.add_argument("--port", type=int, default=8090)
     args = ap.parse_args()
 
+    load_state()  # 启动恢复现场（保留上次各组配置与读数）
+
     global _tick_thread
     _tick_thread = threading.Thread(target=_tick_loop, daemon=True)
     _tick_thread.start()
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"[sim] UI: http://{args.host}:{args.port}", flush=True)
-    print(f"[sim] 默认发布到 {CFG['prefix']}/{CFG['owner_id']}/{CFG['device_sn']}/telemetry @ {CFG['broker']}", flush=True)
+    with LOCK:
+        print(f"[sim] {len(GROUPS)} 组设备，发布到 {CFG['prefix']}/{CFG['owner_id']}/<每页deviceSn>/telemetry @ {CFG['broker']}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        save_state()
         _stop_event.set()
         if _client is not None:
             try:
