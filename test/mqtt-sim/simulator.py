@@ -185,7 +185,7 @@ def load_state():
                     if page == "pump":
                         group[page] = {
                             "device_sn": str(src.get("device_sn") or "SN-VALVE-CODE-001"),
-                            "pump": {k: (float(v) if k != "enabled" else bool(v))
+                            "pump": {k: (_to_bool(v) if k == "enabled" else float(v))
                                      for k, v in {"enabled": False, "delta": 2.0, "noise": 0.5,
                                                   **dict(src.get("pump") or {})}.items()},
                         }
@@ -263,9 +263,7 @@ def _on_message(client, userdata, msg):
         payload = json.loads(msg.payload or b"{}")
         action = str(payload.get("action", "")).upper()
         with LOCK:
-            if owner_id != CFG["owner_id"]:
-                print(f"[cmd] ignore other owner: {msg.topic}", flush=True)
-                return
+            # 不校验 owner（订阅 agri/+/+/command 通配）：命令按 device_sn 定位页设备处理
             gid, page, dev = _find_by_sn(device_sn)
             if dev is None:
                 print(f"[cmd] no device owns {device_sn}: {msg.topic}", flush=True)
@@ -356,8 +354,6 @@ def _handle_threshold_config(client, parts, raw):
     except ValueError:
         return
     with LOCK:
-        if owner_id != CFG["owner_id"]:
-            return
         gid, page, dev = _find_by_sn(device_sn)
     try:
         cfg_msg = json.loads(raw)
@@ -521,6 +517,12 @@ def _publish():
 # ---------------------------------------------------------------- 模拟 tick
 def _clamp(v, lo, hi):
     return max(lo, min(hi, v))
+
+def _to_bool(v):
+    """严格布尔解析：兼容 JSON 布尔与字符串 'true'/'false'/'1'/'0'。"""
+    if isinstance(v, bool):
+        return v
+    return str(v).strip().lower() in ("true", "1", "yes", "on")
 
 def _step():
     """内部采样：每 tick 更新各设备组每页设备读数（高频），并记录曲线（不发布）。"""
@@ -822,7 +824,8 @@ _HTML = """<!DOCTYPE html>
 const $ = id => document.getElementById(id);
 let state = null;
 let curGroup = null;
-let postTimer = null;
+// 每个修改目标独立的防抖 timer：不同控件互不取消（避免一次操作吞掉另一次提交）
+const postTimers = {};
 
 const PAGE_NAMES = { soilMoisture: '土壤湿度', temperature: '温度', light: '光照', pump: '水泵 (增加土壤湿度)' };
 const PAGE_UNITS = { soilMoisture: '%', temperature: '°C', light: 'lx' };
@@ -833,10 +836,12 @@ const PAGE_LIMITS = {
 };
 
 function schedulePost(url, body) {
-  clearTimeout(postTimer);
-  postTimer = setTimeout(() => {
+  const key = url + '|' + JSON.stringify(body);
+  clearTimeout(postTimers[key]);
+  postTimers[key] = setTimeout(() => {
+    delete postTimers[key];
     fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  }, 150);
+  }, 120);
 }
 
 // 本地输入覆盖：输入即记录，轮询合并时优先本地值，服务器同步后再清除
